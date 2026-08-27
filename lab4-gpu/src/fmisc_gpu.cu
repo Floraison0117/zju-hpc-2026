@@ -57,22 +57,8 @@ __device__ void global_interp_device(
 	cx[1] = (cxB[1] > 0) ? (y1 - X_at_1b(Y, cxB[1])) / dY : (y1 + X_at_1b(Y, 1 - cxB[1])) / dY;
 	cx[2] = (cxB[2] > 0) ? (z1 - X_at_1b(Z, cxB[2])) / dZ : (z1 + X_at_1b(Z, 1 - cxB[2])) / dZ;
 
-	double ya[MAX_ORDN * MAX_ORDN * MAX_ORDN];
-	if (d_decide3d(ex, f, f, cxB, cxT, SoA, ya, ORDN, symmetry)) {
-#if GPU_DEBUG_PRINT
-        printf("global_interp position: %f %f %f\n", x1, y1, z1);
-        printf("data range: %f %f %f %f %f %f\n",
-               X_at_1b(X, 1), X_at_1b(X, ex[0]),
-               X_at_1b(Y, 1), X_at_1b(Y, ex[1]),
-               X_at_1b(Z, 1), X_at_1b(Z, ex[2]));
-#endif
-		f_int[0] = NAN;
-		gpu_stop();
-		return;
-	}
-
 	double ddy = 0.0;
-	d_polin3_1b(x1a, x1a, x1a, ya, cx[0], cx[1], cx[2], f_int[0], ddy, ORDN);
+	d_gi_fused(ex, f, cxB, cxT, SoA, cx, x1a, ORDN, f_int[0], ddy);
 }
 
 __global__ void lowerboundset_kernel(int n, double* chi0, double TINNY) {

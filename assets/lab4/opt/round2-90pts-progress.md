@@ -43,6 +43,28 @@
 - 关键 env：OMP_NUM_THREADS=8、AMSS_ENABLE_TWOP_GPU=OFF、OMP_TUNE/PACKED_RELAX/COS_TABLE=ON、AMSS_CUDA_ARCHITECTURES=80、AMSS_OPT=-O3（注意：部署用 -O3，与候选一致；OJ 构建用 CMake 默认）。
 - 部署前 hash 守卫用 9baee005（当前 bssn_rhs_gpu.cu）。
 
+## GitHub 记录 + 缓存清理（2026-08-27 06:45，用户指令）✅
+
+- 远程 `~/lab4-gpu`（P313233 部署态，86 src）已镜像到仓库 `lab4-gpu/`（102 文件，哈希一致：fmisc_gpu d8684f83 / prolongrestrict 68a65584 / bssn_rhs 9baee005）并推送 GitHub（commit 10005e7，origin main）。
+- `.gitignore` 已补齐：.env（含真实 API key）/ .pi / .agents / .codex-zjusct / labs/assets 符号链接 / tmp / .remote_work。labs/assets 是 Typst 构建符号链接，因 core.symlinks=false 会被 git 当作目录展开，已从缓存区移除并 gitignore。
+- 缓存清理：`tmp/`（27M）+ `.remote_work/`（72M）已删。24 个文档引用的 tmp 快照文件已保留到 `assets/lab4/opt/snapshots/tmp/`（561K，含 bssn_rhs_gpu_deployed.cu 等，ABEGPU.md 引用仍有效）。
+- 推送教训：SSH 端口 22 对 ~140MB pack 不稳定（Connection reset），改用 ssh://ssh.github.com:443（git config 自动 fallback）推送成功。
+
+## 第 4 轮子代理（run 1155f44d → 5e654754，04:50-07:00）✅ 完成
+
+- 任务结果：1) 部署态 reprofile（job 175503）：RHS 70.2%（int 190 + face 150 + R6 29）、analysis 48.1s（MassPAng 800×46.5ms=37.2s 占 86%）、prolong 45.3s。2) **A38-1 fused-z KEEP**（L2 534.31s，F=1.0111，bit-exact FINAL PASS，stack 2352→624B；2 文件：fmisc.h 9415328e + fmisc_gpu.cu ddbd2fcf）。3) A38-BND 死路（F=0.9935）、A38-2 sommerfeld 死路（F=0.9999）、A38-P44 4×4×4 死路（smem race + divergent barrier，结构缺陷）。4) tap-sharing 设计已存 `assets/lab4/opt/search/a38_tapsharing_design.md`（-10~25s 潜力，留待下轮）。5) TwoP/init 重叠不可行（driver 依赖）。
+- 回写：search-memory 迭代 38.1-38.8。
+- 本轮后再无已知正收益单变量杠杆（register/spill/live-set/发射/缓存路径全族已闭环）。距 461s/90 分差 ~73s；残余：tap-sharing -10~25s + 算法级授权。
+
+## 第 4 轮部署（A381，✅ 完成 08:35）
+
+- **A381 fused-z 已部署并验证**：job 176888 verify2，**OJ-sim 535.30s**（P313233 540.23 → -4.9s），check FINAL PASS RMS=0 bit-exact，约束逐位一致。证据 `~/a381-verify2-20260827-081220/`。
+- **坑 1**：subagent A/B 后 formal 的 AMSS_NCKU_Input.py 残留 Final_Evolution_Time=2.0，首次 deploy 只跑 2 步 check FAIL（非代码问题）；已恢复 100.0。
+- **坑 2**：deploy 脚本末尾清理 build 导致 verify 无二进制；verify2 改为完整重建+run+check。
+- **坑 3**：lab4g10 单作业配额（a100 maxJobs=1），并行会话占位需等待（176641 Timeout 后重提）。
+- 部署后正式态：fmisc.h `9415328e` / fmisc_gpu.cu `ddbd2fcf` / bssn_rhs `9baee005`。提交包 9 项已清理。
+- 当前基线轨迹：605.78 → 540.23（P313233）→ **535.30s（A381）**。预测 ~85.1 分；90 分需 ≤461s，仍差 ~74s。
+
 ## 主 agent 部署执行（2026-08-27 03:40-04:50）✅ 完成
 
 - **P313233 组合已部署并验证**：deploy 尝试 1（175173）因脚本清理步骤删除证据而不可见结果；deploy2（175289）build OK 但同样清理丢失日志；最终 verify job **175395** 证据完整：**OJ-sim 540.23s**（候选 L2 539.48s，误差 0.14%），check FINAL PASS RMS=0，约束逐位一致。证据 `~/p313233-verify-20260827-042840/`（job/build/run/check log）。

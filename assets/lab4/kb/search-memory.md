@@ -720,7 +720,7 @@ cd ~/lab4-gpu && ./compile.sh
 
 **经验**：发射结构批处理族（P31/RK4/restrict3）三连实测完毕：global_interp +0.6%、RK4 -1.0%、restrict3 ±0%，均 <10s 线或负。该方向关闭。
 
-## 迭代38 部署态 reprofile（P313233 540s）+ A38-BND 边界合并死路 + A38-1 fused-z（进行中）
+## 迭代38 部署态 reprofile（P313233 540s）+ A38-BND 死路 + A38-1 fused-z KEEP + A38-P44 4×4×4 探针
 
 ### 38.1 部署态 reprofile（nsys job 175503，546.75s 含开销 / 干净 540.23s）✅
 
@@ -758,7 +758,7 @@ cd ~/lab4-gpu && ./compile.sh
 
 **死路原因（诚实）**：wave 占用率改善（0.39→1.6 waves）被抵消——face kernel 瓶颈是**每线程依赖链 + x-face 散乱访问（16 sectors/warp-load）**，非 wave 数量；合并仅增加 region 选择指令 + 跨 region 并发 L2 集增大，净 -0.65%。**boundary 7× per-point 是结构性**（thin-slab 布局 + mask/反射 + lopsided/kodis 掩码），26a/26b/26bcd 已到结构极限。勿重试合并。
 
-### 38.3 A38-1：global_interp fused-z（消 ya[6³] 局部数组，L2-pipe 杠杆），进行中
+### 38.3 A38-1：global_interp fused-z（消 ya[6³] 局部数组，L2-pipe 杠杆），**KEEP（见 38.4）**
 
 **候选**：`~/lab4-gpu-cand-a381-fusedz-20260827-054736`（patch `assets/lab4/opt/search/patch_a38_fusedz.py`）。fmisc.h 加 `d_gi_fused`（d_decide3d+d_polin3_1b 融合：每 (i,j) 列直接加载 6 z-taps 立即 polint，ya[216] 物化消除，仅 yatmp[36] 残留）+ fmisc_gpu.cu `global_interp_device` 改调 d_gi_fused。sommerfeld 的 d_decide3d/d_polin3_1b 独立调用保留不动。**bit-exact by construction（8 反射 case 逐 case 验证，factor 乘序 SoA[0]→[1]→[2] 与 fill 一致；polint 消费序一致）**。预期 -13~22s（analysis 42.97s 中 MassPAng 37.2s 的 L2 压力 ~2/3 来自 local stack traffic）。L1 A/B job 175767。
 
@@ -769,3 +769,33 @@ cd ~/lab4-gpu && ./compile.sh
 **A38-2（sommerfeld_rout_gpu.cu 2 调用点改 d_gi_fused，job 175902）**：base med 4.93993 vs cand 4.94055 → **F=0.9999（0 收益）**，8/8 .dat IDENTICAL。死路原因：sommerfeld_rout_compact_kernel 已是 8.1μs 级小 launch（902,976 calls），局部流量消除被 launch 开销/延迟主导吞没；且 P32 compact 后 sommerfeld 仅 7.47s（1.4%），机制正确但模块太小。**sommerfeld fused-z 勿单独部署**（与 A38-1 叠加收益 ≈0）。
 
 **经验**：local-stack 消除（fused-z 机制）只在「大 launch + L2-pipe-bound」的 kernel 上转正收益（global_interp MassPAng ✓），在「小 launch + 延迟主导」的 kernel（sommerfeld）上无效。机制选择必须匹配 ncu 的 pipe-level 证据。
+
+### 38.5 A38-P44：prolong3 4×4×4 组多输出 L0 探针，**feasible（92 regs / 5832B smem / 0 spill），A/B 待测**
+
+**候选**：`~/lab4-gpu-cand-a38p44-probe-20260827-061709`（patch `assets/lab4/opt/search/patch_a38_p44_probe.py`：`#ifdef A38P44_PROBE` 下的 `prolong3_multi4_probe_kernel`，未接线 host）。机制：P33 是 2×2×2（8 输出/组，216 taps 共享）；4×4×4 = 64 输出/组，2 anchors/dim，共享 coarse cube 9³=729 taps（smem 5.8KB），global load 2.4× 削减（1728→729 per 64 输出）。每成员 Z/Y/X 累积序逐 token 复制 P33 奇偶分支（bit-exact by construction）。interior 阈值从 [3,extc-3] 变为 [3,extc-4]（组跨 2 anchors），边界组用 mask 路径（out-of-range tap = 0，与原逐点语义一致）。
+
+**L0 ptxas（job 175955，-DA38P44_PROBE -Xptxas -v）**：prolong3_multi4_probe_kernel **92 regs / 5832B smem / 0 spill / 1 barrier**（对照 P33 boundary 110 regs / 576B stack / 0 spill）。**GATE PASS**（无 spill、smem 5.8KB 不伤占用率、regs 92 ≤ 100）。**A/B 未测**（需 host 接线 + interior 变体 + 组合 L1/L2，见迭代 38.6）。
+
+### 38.6 A38-P44 接线 A/B：**死路（结构缺陷，bit-exact FAIL）**；A38-1 为唯一 keep → 部署候选
+
+**候选**：`~/lab4-gpu-cand-a38p44-wire-20260827-065237`（patch `assets/lab4/opt/search/patch_a38_p44_wire.py`：`prolong3_multi4_kernel` + `_int` 接线 host，G4 = (en-lead)/4+1，interior 阈值 [3,extc-4]，lo/hi 阈值 extc-3）。
+
+**L0 ptxas（job 176250）**：prolong3_multi4_kernel(_int) **92 regs / 5832B smem / 0 spill / 1 barrier**（与探针一致）。
+
+**L1 A/B（job 176250，2 步 ×4 交错）**：**cand 崩溃**（step 1 predictor NaN → MPI_ABORT），base 正常。bit-exact FAIL（cand 无 .dat）。
+
+**死路根因（诚实，结构缺陷，非调试 bug）**：4×4×4 组的 9³ coarse cube 是**每线程私有**工作集（每线程处理不同的 4×4×4 组），但 `__shared__ double cube[9][9][9]` 是**每 block 共享** → 256 线程把 256 个不同组的 729 taps 并发写同一 smem 数组（race）+ 组枚举 early-return 使部分线程跳过 `__syncthreads()`（divergent barrier UB）→ 错值 → NaN。**探针 ptxas「92 regs/0 spill」测的是语义错误的 kernel 的编译结果，不可作为可行性证据**（教训：ptxas gate 不能替代语义正确性；P3.5b 的 no-op 教训同源）。
+
+**结构结论（重要）**：单线程 4×4×4 组的 cube 共享**只有**物化（registers 装不下 729 doubles / local 流量爆炸 110KB/thread / smem 需跨线程共享）三条路；不物化则与 P33 8 次重复等价（load 不削减）。**真正可行的 tap-sharing 是「点 tile 级」smem 共享（多线程共享 cube）**——设计见 `assets/lab4/opt/search/a38_tapsharing_design.md`（4×4 点 tile × 17 var 循环，5.8KB smem，4.7× load 削减，-10~25s 潜力，工程量 2-4h，留待下轮）。**restrict3 group 同族风险**：须 fused-Z 式（每列 union taps 立即累加，不物化 cube）才可行，且预期仅 -4~6s，本轮不做。
+
+### 38.7 本轮部署候选汇总（主 agent 裁决部署）
+
+**唯一 keep = A38-1（global_interp fused-z）**：L2 job 175810 = **534.31s**（部署基线 540.23s → **-5.92s, F=1.0111**），check.sh FINAL PASS RMS=0 bit-exact，约束逐位一致。候选 `~/lab4-gpu-cand-a381-fusedz-20260827-054736`，改动 2 文件：`src/fmisc.h`（hash `9415328e`）+ `src/fmisc_gpu.cu`（hash `ddbd2fcf`），其余 7 文件与部署基线逐字节一致。**部署指令**：快照 → cp 两文件到 ~/lab4-gpu/src → ./compile.sh（AMSS_OPT=-O3）→ 100 步 OJ-sim 验证（预计 ~534s）。
+
+**本轮其余 verdict**：A38-BND（边界 7→3 launch 合并）F=0.9935 死路；A38-2（sommerfeld fused-z）F=0.9999 死路；A38-P44（4×4×4）结构死路；tap-sharing 设计完成未实现；TwoP/init 重叠 driver 级不可行。
+
+### 38.8 restrict3 group（P33 式 2×2×2 组）分析结论：**本轮不做（fused 仅 1.5× load 削减，边际）**
+
+关键结构差异（vs prolong3 P33）：prolong3 的 2 个 fine 成员共享**同一** 6-tap 窗口（anchor 相同，仅系数序不同）→ P33 8× load 削减；restrict3 的 2 个 coarse 成员窗口**错位**（[kf-2,kf+3] vs [kf,kf+5]，共享 4/6 taps/dim）→ union 8³=512 taps。**fused 版（不物化，tmp2 进寄存器）仅 1.5× 削减（1,152/8 输出 vs 216/输出）**，materialized 版 3.4× 但需 512 doubles 存储（registers 装不下 / smem 跨线程 race（p44 教训）/ local 流量爆炸）→ 与 4×4×4 同族死路。预期 -3~5s，effort/risk 不成比例，**本轮不做**。restrict3 的 ncu（L2 11%、long_scoreboard 2.13、1.04 waves）确认其 latency-bound 且 L2 远未饱和 → load 削减收益本就有限。
+
+**本轮最终部署栈**：部署基线（P313233 540.23s）+ **A38-1 fused-z → 534.31s**（唯一 keep）。其余全部死路/不可行/设计待实现。

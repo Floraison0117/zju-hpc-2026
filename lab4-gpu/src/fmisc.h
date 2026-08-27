@@ -387,6 +387,61 @@ __device__ __forceinline__ void d_polin3_1b(
 	}
 	polint(x1a, ymtmp, x1, y, dy, ordn);
 }
+// A38-1: fused (d_decide3d + d_polin3_1b). Eliminates the ya[6^3] local array
+// (1728B write+read per (point,var)) by consuming each (i,j) column's 6 z-taps
+// immediately. Bit-exact: per-tap formula (direct vs 1-idx reflection per dim,
+// factor order SoA[0], SoA[1], SoA[2]) and polint consumption order replicate
+// d_decide3d + d_polin3_1b exactly. sommerfeld keeps the original pair.
+__device__ __forceinline__ void d_gi_fused(
+	const int ex[3], const double* f, const int cxB[3], const int cxT[3],
+	const double SoA[3], const double cx[3], const double x1a[MAX_ORDN],
+	int ordn, double& y, double& dy
+) {
+	int fmin1[3], fmin2[3], fmax1[3], fmax2[3];
+	bool gont = false;
+	for (int m = 0; m < 3; ++m) {
+		if (!(abs(cxB[m]) >= 0)) gont = true;
+		if (!(abs(cxT[m]) >= 0)) gont = true;
+		fmin1[m] = max(1, cxB[m]);
+		fmax1[m] = cxT[m];
+		fmin2[m] = cxB[m];
+		fmax2[m] = min(0, cxT[m]);
+		if ((fmin1[m] <= fmax1[m]) && (fmin1[m] < 1 || fmax1[m] > ex[m])) gont = true;
+		if ((fmin2[m] <= fmax2[m]) && (1 - fmax2[m] < 1 || 1 - fmin2[m] > ex[m])) gont = true;
+	}
+	if (gont) { y = NAN; dy = NAN; gpu_stop(); return; }
+
+	double yatmp[MAX_ORDN * MAX_ORDN];
+	double ymtmp[MAX_ORDN];
+	double yntmp[MAX_ORDN];
+	double yqtmp[MAX_ORDN];
+
+	for (int i = 0; i < ordn; ++i) {
+		for (int j = 0; j < ordn; ++j) {
+			for (int k = 0; k < ordn; ++k) {
+				int i_abs = cxB[0] + i;
+				int j_abs = cxB[1] + j;
+				int k_abs = cxB[2] + k;
+				bool ir = (i_abs >= fmin2[0] && i_abs <= fmax2[0]);
+				bool jr = (j_abs >= fmin2[1] && j_abs <= fmax2[1]);
+				bool kr = (k_abs >= fmin2[2] && k_abs <= fmax2[2]);
+				int ii = ir ? 1 - i_abs : i_abs;
+				int jj = jr ? 1 - j_abs : j_abs;
+				int kk = kr ? 1 - k_abs : k_abs;
+				double tap = f_at_1b(f, ex, ii, jj, kk);
+				if (ir) tap *= SoA[0];
+				if (jr) tap *= SoA[1];
+				if (kr) tap *= SoA[2];
+				yqtmp[k] = tap;
+			}
+			polint(x1a, yqtmp, cx[2], yatmp[j * ordn + i], dy, ordn);
+		}
+		for (int j = 0; j < ordn; ++j) yntmp[j] = yatmp[j * ordn + i];
+		polint(x1a, yntmp, cx[1], ymtmp[i], dy, ordn);
+	}
+	polint(x1a, ymtmp, cx[0], y, dy, ordn);
+}
+
 
 __device__ __forceinline__ bool d_decide3d(
 	const int ex[3], const double* f, const double* fpi,
