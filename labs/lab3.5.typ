@@ -1,4 +1,5 @@
 #import "@preview/cuti:0.2.1": show-cn-fakebold
+#import "@preview/cetz:0.3.2"
 
 #show: show-cn-fakebold
 #set text(font: ("Palatino Linotype", "KaiTi"))
@@ -115,15 +116,10 @@ baseline 合计 8 个样本（含同条件复测 3 次）中位 #strong[15.01 us
 baseline 的 msprof（`aic-metrics=Default`）显示：Task 14.98 us，Block Dim 40，
 核 0-35 各 7 行、核 36 仅 4 行、核 37-39 空转；流水占比中位 vec 19-23%（2.72 us）、
 scalar 37-51%（4.7-7.1 us）、MTE2 35-42%（4.2-5.5 us）、MTE3 14-16%（1.9 us）；
-L2 命中率 6.6%，GM 到 UB 带宽利用率约 2%。没有任何流水线被占满，说明瓶颈是
-串行化、同步与负载不均，而非计算或带宽。
+L2 命中率 6.6%，GM 到 UB 带宽利用率约 2%。没有任何流水线被占满，说明瓶颈是串行化、同步与负载不均，而非计算或带宽。
 
 = 优化迭代
 #v(0.5em)
-
-优化遵循"一次只改一个主要因素"的协议：改 → build → 5 case 正确性 → case 2 计时
-不少于 3 次 →（必要时）profile 或 simulator → 接受或回退。各版本 case 2 中位耗时
-汇总如下。
 
 #figure(
   table(
@@ -133,18 +129,18 @@ L2 命中率 6.6%，GM 到 UB 带宽利用率约 2%。没有任何流水线被�
     table.hline(stroke: 1pt),
     table.header([版本], [主要修改], [5 case], [case2 中位 / us], [相对基线]),
     table.hline(stroke: 0.5pt),
-    [V0 基线], [按行 TQue + PIPE_ALL], [5/5], [15.01], [1.00×],
+    [V0 baseline], [按行 TQue + PIPE_ALL], [5/5], [15.01], [1.00×],
     [V2], [去除 CopyIn/Out 的 PIPE_ALL，TQue 双缓冲生效], [5/5], [9.92], [1.52×],
     [V4], [批量 chunk 路径：chunk 级拷贝、R 留 UB、一次 V_S 同步], [5/5], [7.62], [1.98×],
     [V5], [rstd 全标量，省每行 3 个微型向量操作], [5/5], [7.60], [1.97×],
     [V9], [批量路径去 TQue，raw TBuf + 手动事件，weight 移出关键路径], [5/5], [6.94], [2.16×],
-    [V13 最终], [tiling: blockDim=32 + rowsPerChunk=8；chunk 宽 phase A/B], [5/5], [6.28], [2.39×],
+    [V13 final], [tiling: blockDim=32 + rowsPerChunk=8；chunk 宽 phase A/B], [5/5], [6.28], [2.39×],
     table.hline(stroke: 1pt),
   ),
   caption: [优化版本汇总（case 2，`checker/profile.sh` 中位数）],
 )
 
-== I1：消除 PIPE_ALL 串行化（V2）
+== 消除 PIPE_ALL 串行化（V2）
 #v(0.5em)
 
 #strong[瓶颈]：baseline 的 msprof 显示 MTE2/V/MTE3 均远未占满（利用率 19-51%），
@@ -157,7 +153,7 @@ TQue `EnQue/DeQue` 自动插入的 MTE2→V 与 V→MTE3 同步事件，并配�
 #strong[收益]：中位 15.01 → 9.92 us（-34%）。`TQue` 的队列事件提供了正确的跨流水同步，
 而 `PIPE_ALL` 是多余的全局屏障。
 
-== I2：批量 chunk 路径（V4）
+== 批量 chunk 路径（V4）
 #v(0.5em)
 
 #strong[瓶颈]：simulator 显示单行（H=4096）约 852 条 SCALAR 指令，其中约 85% 是队列
@@ -165,14 +161,13 @@ API、地址与掩码 setup；逐行的队列调用是 scalar 主要开销，且
 MTE2 带宽。
 
 #strong[修改]：对齐且 $H <= 4096$ 时走批量路径：一个 chunk 的多行用一条多块 `DataCopy`
-搬入（行在 GM 中连续，`blockCount=n, blockLen=H/16`），$R$ 保留在 UB，逐行规约
-写入 `sumSqArr[row*8]`（32 B 对齐 lane），整个 chunk 只做一次 V→S 同步；输出
+搬入（行在 GM 中连续，`blockCount=n, blockLen=H/16`），$R$ 保留在 UB，逐行规约写入 `sumSqArr[row*8]`（32 B 对齐 lane），整个 chunk 只做一次 V→S 同步；输出
 `residual_out`、`y` 各用一条多块 DataCopy 写回。
 
 #strong[收益]：中位 9.92 → 7.62 us（-21%）。msprof 中 MTE3 从 1.7 us 降到 0.24 us
 （chunk 级大拷贝），scalar 从 4.2-4.7 us 降到 2.6 us。
 
-== I3：标量 rstd（V5）
+== 标量 rstd（V5）
 #v(0.5em)
 
 #strong[瓶颈]：原实现对每行做 Duplicate + Sqrt + Div 三个微型向量操作，rstd 的计算串在
@@ -184,11 +179,10 @@ V 链上。
 #strong[收益]：中位 7.62 → 7.04 us（-8%）。精度方面，标量 `1/sqrt` 与 golden 的
 `R / sqrt(...)` 在 FP32 下相差约 1-2 ULP，最终误差仍由 FP16 舍入边界翻转主导。
 
-== I4：raw TBuf 替换队列簿记，weight 移出关键路径（V9）
+== raw TBuf 替换队列簿记，weight 移出关键路径（V9）
 #v(0.5em)
 
-#strong[瓶颈]：V5 的批量路径仍用 TQue 管理输入输出，每 chunk 的 Alloc/EnQue/DeQue/Free
-簿记与基线 weight 加载处的 `PipeBarrier<PIPE_ALL>` 仍在消耗标量周期；且 2 KB 的
+#strong[瓶颈]：V5 的批量路径仍用 TQue 管理输入输出，每 chunk 的 Alloc/EnQue/DeQue/Free 与基线 weight 加载处的 `PipeBarrier<PIPE_ALL>` 仍在消耗标量周期；且 2 KB 的
 weight 拷贝被 PIPE_ALL 放到 kernel 启动的关键路径上。
 
 #strong[修改]：批量路径改用 raw `TBuf` + 显式 `SetFlag/WaitFlag`（每类事件用高位硬编码
@@ -196,10 +190,9 @@ ID，如 `EVENT_ID5`，避免与框架事件池冲突）。weight 拷贝首条�
 Set/Wait(MTE2_V) 并 Cast，与 chunk 数据拷贝互不阻塞。
 
 #strong[收益]：中位 7.60 → 6.94 us。同时修复了原代码中 `sumSqBuf` 只按 8 个 float 分配、
-而每行按 32 B 步长写 `sumSqArr[row*8]` 导致的 UB 越界隐患（该隐患在旧布局下被
-weight 提前 Cast 的时序掩盖）。
+而每行按 32 B 步长写 `sumSqArr[row*8]` 导致的 UB 越界隐患。
 
-== I5：Tiling 与 chunk 宽向量化（V13，最终）
+== Tiling 与 chunk 宽向量化（V13）
 #v(0.5em)
 
 #strong[瓶颈]：V9 在 blockDim=40 下，256 行被切成 16 个核各 7 行、24 个核各 6 行，
@@ -207,13 +200,14 @@ weight 提前 Cast 的时序掩盖）。
 （每行 5 个元素级操作 + 3 个规约操作）。
 
 #strong[修改]（host 与 kernel 协同）：
+#v(0.5em)
 1. blockDim 设为 $min("AIV", B, 32)$。256 行 = 32 核 × 8 行，负载完全均衡，
    同时减少 kernel 分派开销（课程文档的空 kernel 图显示分派成本随核数线性增长）；
 2. `rowsPerChunk` 预算从 144 KiB 提到 160 KiB，H=1024 时 chunk=8，每核恰好 1 个
    chunk，避免跨 chunk 同步；
 3. phase A 改为 chunk 宽：行在 UB 中连续，`Cast/Cast/Add/Cast/Mul` 由每行 5 次
    变成每 chunk 5 次（8 行合并）；phase B 的 y 输出 Cast 也合并为 chunk 宽一次。
-
+#v(0.5em)
 #strong[收益]：中位 6.94 → 6.28 us（官方评测 6.02 us，76 分）。V13 的 msprof：
 Task 6.54 us，aiv 中位 5.00 us（最大 5.89），vec 1.52 us，scalar 2.33 us，
 MTE2 1.51 us，MTE3 约 0.26 us。
@@ -226,12 +220,12 @@ MTE2 1.51 us，MTE3 约 0.26 us。
     table.hline(stroke: 1pt),
     table.header([版本], [Task / us], [aiv / us], [vec / us], [scalar / us], [MTE2 / us], [MTE3 / us]),
     table.hline(stroke: 0.5pt),
-    [V0 基线], [14.98], [12-14], [2.7], [4.7-7.1], [4.2-5.5], [1.9],
+    [V0 baseline], [14.98], [12-14], [2.7], [4.7-7.1], [4.2-5.5], [1.9],
     [V5], [7.42], [5.22], [1.56], [2.62], [1.81], [0.24],
-    [V13 最终], [6.54], [5.00], [1.52], [2.33], [1.51], [0.26],
+    [V13 final], [6.54], [5.00], [1.52], [2.33], [1.51], [0.26],
     table.hline(stroke: 1pt),
   ),
-  caption: [各版本 msprof 中位流水时间（PipeUtilization.csv，aiv 各列）],
+  caption: [各版本 msprof 中位流水时间],
 )
 
 == 最终实现的数据流（V13）
@@ -239,17 +233,57 @@ MTE2 1.51 us，MTE3 约 0.26 us。
 
 对齐批量路径（$H % 16 == 0$ 且 $H <= 4096$）的最终数据流：
 
-#codeblock[
-```text
-GM x/residual →(2 条多块 DataCopy, blockCount=n, blockLen=H/16) → inBuf(F16, x|res)
-  → Cast x32 | Cast res32（存入 rFp32 备用半区）→ Add → R32（覆盖 x32 区）
-  → Cast → residual_out（F16 chunk 缓冲）
-  → Mul sq = R^2 → per-row Block/WholeReduceSum → sumSqArr[row*8]
-  → 1 次 V→S 同步 → per-row 标量 rstd = 1/sqrt(sumSq*invH+eps)
-  → per-row Muls(R, rstd); Mul(R, weight) → chunk 宽 Cast → y
-  → residual_out、y 各 1 条多块 DataCopy 写回 GM
-```
-]
+#figure(
+  cetz.canvas({
+    import cetz.draw: *
+    let fillb = rgb("#eef2f7")
+    let strokeb = 0.6pt + rgb("#44506b")
+    // 数据盒子: 两个对角点
+    let box2(c1, c2, label) = {
+      rect(c1, c2, fill: fillb, stroke: strokeb)
+      content(((c1.at(0) + c2.at(0)) / 2, (c1.at(1) + c2.at(1)) / 2), label)
+    }
+    // 主线（y=4.6）
+    box2((0.4, 4.1), (2.3, 5.1), [GM: x, residual])
+    box2((3.6, 4.1), (5.9, 5.1), [inBuf (FP16, x|res)])
+    box2((7.3, 4.1), (9.7, 5.1), [R32 (FP32, UB)])
+    box2((11.0, 4.1), (13.1, 5.1), [y32 (FP32)])
+    box2((14.1, 4.1), (15.4, 5.1), [y (FP16)])
+    // 主线箭头与操作
+    line((2.3, 4.6), (3.6, 4.6), marker: (end: ">"))
+    content((2.95, 4.95), text(size: 8pt, [MTE2 多块 DataCopy]))
+    line((5.9, 4.6), (7.3, 4.6), marker: (end: ">"))
+    content((6.6, 4.95), text(size: 8pt, [Cast x32, res32; Add]))
+    line((9.7, 4.6), (11.0, 4.6), marker: (end: ">"))
+    content((10.35, 4.95), text(size: 8pt, [Muls(rstd); Mul(weight)]))
+    line((13.1, 4.6), (14.1, 4.6), marker: (end: ">"))
+    content((13.6, 4.95), text(size: 8pt, [Cast]))
+    line((15.4, 4.6), (16.5, 4.6), marker: (end: ">"))
+    content((16.0, 4.95), text(size: 8pt, [GM y]))
+    // 底部: residual_out 分支
+    line((8.4, 4.1), (5.6, 2.6), marker: (end: ">"))
+    content((7.4, 3.1), text(size: 8pt, [Cast]))
+    box2((3.8, 1.6), (6.0, 2.5), [residual_out (FP16)])
+    line((6.0, 2.05), (7.3, 2.05), marker: (end: ">"))
+    content((6.65, 2.35), text(size: 8pt, [MTE3 多块 DataCopy]))
+    box2((7.3, 1.6), (9.2, 2.5), [GM residual_out])
+    // 底部: 规约与 rstd 分支
+    line((8.6, 4.1), (10.6, 2.6), marker: (end: ">"))
+    content((9.2, 3.1), text(size: 8pt, [Mul]))
+    box2((9.9, 1.6), (11.6, 2.5), [sq = $R^2$])
+    line((11.6, 2.05), (12.6, 2.05), marker: (end: ">"))
+    content((12.1, 2.35), text(size: 8pt, [Block/WholeReduceSum]))
+    box2((12.6, 1.6), (14.0, 2.5), [sumSqArr])
+    line((14.0, 2.05), (15.0, 2.05), marker: (end: ">"))
+    content((14.5, 2.35), text(size: 8pt, [V→S 同步]))
+    box2((15.0, 1.6), (16.6, 2.5), [标量 rstd])
+    // rstd 反馈到 Muls
+    line((15.8, 2.6), (12.2, 4.1), marker: (end: ">"))
+    content((14.6, 3.1), text(size: 8pt, [rstd]))
+  }),
+  caption: [V13 对齐批量路径数据流（虚线为同步点所在，见正文同步设计）],
+)
+
 
 同步设计：weight 拷贝首条发出 + 紧邻 Set/Wait(MTE2_V) + Cast（不在 phase A 关键
 路径上）；chunk 数据拷贝后 Set/Wait(MTE2_V)；规约后一次 V→S；输出前紧邻
@@ -393,14 +427,3 @@ LocalTensor 在 UB 中的地址与一个事件 ID 登记进 TPipe 的队列记�
 语义 + 事件 ID 池冲突），最终只能退回单 chunk 结构。对比 NVIDIA 生态，CUDA 的
 异步拷贝与隐式依赖追踪让这类小算子更容易写出安全的高重叠实现；昇腾的显式事件
 模型性能上限更高、但正确性验证成本也更高。
-
-= 参考资料
-#v(0.5em)
-
-+ 课程 Lab3.5 页面：https://hpc101.zjusct.io/lab/Lab3.5-AscendC-Op/
-+ Ascend C 开发文档与 API 参考（CANN 8.5.0，华为昇腾社区）
-+ msProf 算子调优工具文档（CANN 8.5.0）
-+ 昇腾 AI 处理器产品页：https://www.hiascend.com/hardware/processor
-+ Ascend C 算子性能优化实用技巧系列（流水优化、内存优化、搬运优化、Tiling 优化）
-+ FlashInfer `fused_add_rmsnorm` 文档与源码
-+ RMSNorm：B. Zhang 等, Root Mean Square Layer Normalization（NeurIPS 2019）
