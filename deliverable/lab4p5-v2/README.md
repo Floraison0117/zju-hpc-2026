@@ -24,15 +24,15 @@
 使用远端 `lab5` H800 MIG 1g.10gb 分区，按官方 `sm_90a -O3 -std=c++17 -Iinclude` 参数 clean build，运行：
 
 ```text
-hpc submit -p lab5 -g 1 "cd ~/codex-lab4p5-emu-20260827 && export PATH=/usr/local/cuda/bin:$PATH && make clean && make && ./benchmark 4096,8192 2,4,6,8 3 --csv"
+hpc submit -p lab5 -g 1 "cd ~/codex-lab4p5-emu-20260827 && ./benchmark 4096,8192 2,4,6,8 10 --csv"
 ```
 
-作业 `177618` 退出码为 0。页面定义的满分阈值为 splits=2/4/6/8 对应 `10000/5000/3000/3000 GFLOPS`，本次结果如下：
+作业 `177618` 完成 clean build 和 3 次代理测试，作业 `177639` 完成 10 次迭代测试，均退出码为 0。页面定义的满分阈值为 splits=2/4/6/8 对应 `10000/5000/3000/3000 GFLOPS`，10 次迭代结果如下：
 
 | 矩阵 | splits=2 | splits=4 | splits=6 | splits=8 |
 |---|---:|---:|---:|---:|
-| 4096³ GFLOPS | 10121.15 | 5528.52 | 3264.52 | 3258.52 |
-| 8192³ GFLOPS | 12966.55 | 5947.05 | 3328.07 | 3324.25 |
+| 4096³ GFLOPS | 10342.59 | 5552.76 | 3284.37 | 3283.67 |
+| 8192³ GFLOPS | 12968.55 | 5949.20 | 3329.31 | 3330.10 |
 
 对应的 L2 relative error 为：
 
