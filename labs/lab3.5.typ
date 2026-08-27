@@ -1,5 +1,4 @@
 #import "@preview/cuti:0.2.1": show-cn-fakebold
-#import "@preview/cetz:0.3.2"
 
 #show: show-cn-fakebold
 #set text(font: ("Palatino Linotype", "KaiTi"))
@@ -140,50 +139,52 @@ $ "score"(T) = 100 ln(15/T) / ln(15/4.5) approx 83.058 ln(15/T) $ <score>
 $T < 15 exp(-90/83.058) approx 5.08 "us"$。
 
 #figure(
-  cetz.canvas({
-    import cetz.draw: *
-    // 坐标映射: T in [3.5,15] -> x in [0.5,9.5]; score in [0,130] -> y in [0,5.4]
-    let x(t) = 0.5 + (t - 3.5) / (15 - 3.5) * 9.0
-    let y(s) = s / 130.0 * 5.4
-    // 坐标轴
-    line((x(3.5), y(0)), (x(15), y(0)), marker: (end: ("arrow", 0.1)))
-    line((x(3.5), y(0)), (x(3.5), y(130)), marker: (end: ("arrow", 0.1)))
-    for t in (4, 6, 8, 10, 12, 14) {
-      let p = (x(t), y(0))
-      line(p, (p.at(0), y(-8)), stroke: gray)
-      content((p.at(0), y(-0.22)), [
-        #set text(size: 7pt)
-        #t
-      ])
-    }
-    for s in (30, 60, 90, 120) {
-      let p = (x(3.5), y(s))
-      line(p, (p.at(0) - 0.10, p.at(1)), stroke: gray)
-      content((x(3.3), p.at(1)), [
-        #set text(size: 7pt)
-        #s
-      ], anchor: "east")
-    }
-    content((x(14.2), y(-0.55)), [$T$ / $mu s$])
-    content((x(3.05), y(128)), [得分], anchor: "west")
-    // 评分曲线: score(T) = 83.058 ln(15/T)
-    let pts = ()
-    for i in range(0, 24) {
-      let t = 3.5 + i * 0.5
-      let s = 83.058 * calc.ln(15.0 / t)
-      pts.push((x(t), y(s)))
-    }
-    pts.push((x(15), y(0)))
-    line(..pts, stroke: (paint: rgb("#1f5fa8"), thickness: 1.2pt))
-    // 标注点
-    for (t, s) in ((15, 0), (4.5, 100), (3.5, 120), (6.02, 75.8)) {
-      circle((x(t), y(s)), radius: 0.07, fill: rgb("#c0392b"), stroke: none)
-    }
-    content((x(14.6), y(4)), [基线 15 us, 0 分], anchor: "north")
-    content((x(4.9), y(106)), [100 分], anchor: "south")
-    content((x(3.9), y(124)), [120 分], anchor: "south")
-    content((x(6.5), y(78)), [本实验 6.02 us, 76 分], anchor: "south")
-  }),
+  align(center,
+    box(
+      width: 100%,
+      height: 6.4cm,
+      {
+        // 坐标映射: T in [3.5,15] -> dx; score in [0,130] -> dy（y 向下增长）
+        let X(t) = 26pt + (t - 3.5) / (15 - 3.5) * 300pt
+        let Y(s) = 5.7cm - s / 130.0 * 5.1cm
+        // 坐标轴（每个曲线元素用 place 放到盒子原点，坐标即盒子坐标）
+        place(dx: 0pt, dy: 0pt, curve(stroke: 0.9pt + black,
+          curve.move((X(3.5), Y(0))), curve.line((X(15), Y(0)))))
+        place(dx: 0pt, dy: 0pt, curve(stroke: 0.9pt + black,
+          curve.move((X(3.5), Y(0))), curve.line((X(3.5), Y(130)))))
+        // 刻度与刻度值
+        for t in (4, 6, 8, 10, 12, 14) {
+          place(dx: 0pt, dy: 0pt, curve(stroke: 0.5pt + gray,
+            curve.move((X(t), Y(0))), curve.line((X(t), Y(-6)))))
+          place(dx: X(t) - 8pt, dy: Y(0) + 2pt, text(size: 7pt, [#t]))
+        }
+        for s in (30, 60, 90, 120) {
+          place(dx: 0pt, dy: 0pt, curve(stroke: 0.5pt + gray,
+            curve.move((X(3.5), Y(s))), curve.line((X(3.5) - 7pt, Y(s)))))
+          place(dx: X(3.5) - 20pt, dy: Y(s) - 5pt, text(size: 7pt, [#s]))
+        }
+        place(dx: X(14.0), dy: Y(-18), text(size: 8pt, [$T$ / $mu s$]))
+        place(dx: X(2.4), dy: Y(128), text(size: 8pt, [得分]))
+        // 评分曲线: score(T) = 83.058 ln(15/T)
+        let pts = ()
+        for i in range(0, 24) {
+          let t = 3.5 + i * 0.5
+          pts.push((X(t), Y(83.058 * calc.ln(15.0 / t))))
+        }
+        pts.push((X(15), Y(0)))
+        place(dx: 0pt, dy: 0pt, curve(stroke: 1.3pt + rgb("#1f5fa8"),
+          curve.move(pts.at(0)), ..pts.slice(1).map(curve.line)))
+        // 标注点
+        for (t, s) in ((15, 0), (4.5, 100), (3.5, 120), (6.02, 75.8)) {
+          place(dx: X(t) - 3pt, dy: Y(s) - 3pt, box(width: 6pt, height: 6pt, radius: 50%, fill: rgb("#c0392b")))
+        }
+        place(dx: X(14.2) - 40pt, dy: Y(-16), text(size: 8pt, [基线 15 us, 0 分]))
+        place(dx: X(4.8) - 12pt, dy: Y(104), text(size: 8pt, [100 分]))
+        place(dx: X(3.6) - 12pt, dy: Y(122), text(size: 8pt, [120 分]))
+        place(dx: X(6.5) - 30pt, dy: Y(78), text(size: 8pt, [本实验 6.02 us, 76 分]))
+      },
+    ),
+  ),
   caption: [评分曲线与实验结果位置（标定自课程页面 score.png，公式见 @score）],
 )
 
