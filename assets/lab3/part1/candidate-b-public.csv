@@ -1,5 +1,0 @@
-case,correctness,median_ms
-# Candidate B (fused single-kernel) has NOT been benchmarked yet.
-# The GPU pod currently lacks GPU passthrough.
-# To benchmark: set GDN_USE_FUSED=1 and run the benchmark script.
-# Expected correctness: all PASS (same math, different computation order).

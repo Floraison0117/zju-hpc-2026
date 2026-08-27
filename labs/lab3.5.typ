@@ -232,51 +232,17 @@ MTE2 1.51 us，MTE3 约 0.26 us。
 
 对齐批量路径（$H % 16 == 0$ 且 $H <= 4096$）的最终数据流：
 
-#figure(
-  align(center,
-    box(
-      width: 100%,
-      height: 205pt,
-      {
-        let y1 = 32pt     // 上行盒子中心
-        let y2 = 152pt    // 下行盒子中心
-        let bh = 30pt     // 盒子高
-        let boxat(cx, cy, w, label) = place(
-          dx: cx - w / 2, dy: cy - bh / 2,
-          box(width: w, height: bh, fill: rgb("#eef2f7"), stroke: 0.6pt + rgb("#44506b"),
-              align(center + horizon, text(size: 8pt, label))))
-        let arrow(x1, y1p, x2, y2p, lab) = {
-          place(dx: 0pt, dy: 0pt, curve(stroke: 0.7pt + black,
-            curve.move((x1, y1p)), curve.line((x2, y2p))))
-          place(dx: (x1 + x2) / 2 - 24pt, dy: (y1p + y2p) / 2 - 7pt, text(size: 6pt, lab))
-        }
-        // 上行主线（T1→T4）
-        boxat(40pt, y1, 58pt, [GM x/res])
-        boxat(148pt, y1, 58pt, [inBuf (FP16)])
-        boxat(258pt, y1, 58pt, [R32 (FP32)])
-        boxat(398pt, y1, 78pt, [y → GM y])
-        arrow(69pt, y1, 119pt, y1, [MTE2 多块 DataCopy])
-        arrow(177pt, y1, 229pt, y1, [Cast x32, res32; Add])
-        arrow(287pt, y1, 359pt, y1, [Muls(rstd); Mul(weight); Cast])
-        // 下行左支: residual_out
-        arrow(280pt, y1 + 15pt, 86pt, y2 - 15pt, [Cast])
-        boxat(70pt, y2, 62pt, [residual_out (FP16)])
-        boxat(190pt, y2, 64pt, [GM residual_out])
-        arrow(101pt, y2, 158pt, y2, [MTE3 多块 DataCopy])
-        // 下行右支: 规约与 rstd
-        arrow(270pt, y1 + 15pt, 306pt, y2 - 15pt, [Mul])
-        boxat(330pt, y2, 56pt, [sq = $R^2$])
-        boxat(400pt, y2, 54pt, [sumSqArr])
-        arrow(358pt, y2, 373pt, y2, [Block/WholeReduceSum])
-        arrow(427pt, y2, 442pt, y2, [V→S 同步])
-        boxat(464pt, y2, 58pt, [标量 rstd])
-        // rstd 反馈到 Muls（T3→T4 箭头中部）
-        arrow(478pt, y2 - 15pt, 326pt, y1 + 15pt, [rstd])
-      },
-    ),
-  ),
-  caption: [V13 对齐批量路径数据流（同步点见正文同步设计）],
-)
+#codeblock[
+```text
+GM x/residual →(2 条多块 DataCopy, blockCount=n, blockLen=H/16) → inBuf(F16, x|res)
+  → Cast x32 | Cast res32（存入 rFp32 备用半区）→ Add → R32（覆盖 x32 区）
+  → Cast → residual_out（F16 chunk 缓冲）
+  → Mul sq = R^2 → per-row Block/WholeReduceSum → sumSqArr[row*8]
+  → 1 次 V→S 同步 → per-row 标量 rstd = 1/sqrt(sumSq*invH+eps)
+  → per-row Muls(R, rstd); Mul(R, weight) → chunk 宽 Cast → y
+  → residual_out、y 各 1 条多块 DataCopy 写回 GM
+```
+]
 
 同步设计：weight 拷贝首条发出 + 紧邻 Set/Wait(MTE2_V) + Cast（不在 phase A 关键
 路径上）；chunk 数据拷贝后 Set/Wait(MTE2_V)；规约后一次 V→S；输出前紧邻
@@ -321,8 +287,7 @@ $B=1$ 单核、极小 H=3/8、$[-1000, 1000]$ 大范围数据），全部 PASS�
 #v(0.5em)
 
 最终版本 case 2 的 5 个新样本：5.90, 6.28, 6.60, 6.46, 6.10 us，中位 #strong[6.28 us]，
-范围 5.90-6.60。官方 OJ 评测 `Task Duration = 6.02 us`，得分 #strong[76/120]，相对课程
-基线（15 us）加速 #strong[2.49 倍]，相对我们复测的基线中位（15.01 us）2.39 倍。
+范围 5.90-6.60。官方 OJ 评测 `Task Duration = 6.02 us`，得分 #strong[76/120]。
 
 #figure(
   table(
@@ -335,88 +300,40 @@ $B=1$ 单核、极小 H=3/8、$[-1000, 1000]$ 大范围数据），全部 PASS�
     [正确性], [5/5], [5/5 + 22 隐藏 PASS], [官方评测通过],
     [case2 中位 / us], [15.01], [6.28], [本机 `checker/profile.sh`],
     [官方 Task / us], [约 15], [6.02], [OJ 评测 `513c599c-r7`],
-    [官方得分], [0], [76/120], [课程评分曲线（基线 15 us 对应 0 分，满分 120）],
+    [官方得分], [0], [76/120], [课程评分曲线],
     table.hline(stroke: 1pt),
   ),
   caption: [最终结果汇总],
 )
 
-== 未达 90 分的瓶颈分析
-#v(0.5em)
-
-case 2 每核 8 行、单 chunk 结构下，关键路径为
-MTE2(1.51 us) → V(1.52 us) → S(rstd) → V(B) → MTE3(约 0.26 us)，各段基本串行。
-msprof 中 aiv 中位 5.00 us 减去约 1.8 us 的 kernel 入口固定开销后，工作段约
-3.2 us。要进入 90 分区间（5.08 us 以下）必须把 MTE2 藏到 V 计算之下，即多 tile
-双缓冲管线，但该方案在本工具链下反复死锁（见上节）。空 kernel 探针显示
-40 核分派 + 入口的固定成本约 2-4 us，也压缩了剩余优化空间。
-
 = 思考题
 #v(0.5em)
 
-== 1. GM 读写量、FLOP 与算术强度
+== GM 读写量、FLOP 与算术强度
 #v(0.5em)
 
 $[256, 1024]$、FP16 下：读 x、residual 各 512 KiB，写 y、residual_out 各 512 KiB，
-合计 #strong[2 MiB] GM 流量。每元素主要运算：残差加 1 次 Add、平方 1 次 Mul、规约约
+合计 2 MiB GM 流量。每元素主要运算：残差加 1 次 Add、平方 1 次 Mul、规约约
 1 次 Add、rstd 缩放 1 次 Muls、权重 1 次 Mul，约 5 FLOP，总计约 1.31 MFLOP。
-算术强度约 $0.63$ FLOP/B，是典型的访存类算子。但 msprof 显示 GM 到 UB 带宽利用率
-仅约 2%（baseline）到 20% 量级（最终版），Task 6.02 us 对应等效带宽约
-2 MiB/6.02 us ≈ 350 GB/s，远低于 910B4 的 HBM 带宽。因此本实现既不是计算瓶颈
+算术强度约 $0.63$ FLOP/B，是典型的访存类算子。
+
+但 msprof 显示 GM 到 UB 带宽利用率仅约 2%（baseline）到 20% 量级（最终版），Task 6.02 us 对应等效带宽约 2 MiB/6.02 us ≈ 350 GB/s，远低于 910B4 的 HBM 带宽。因此本实现既不是计算瓶颈
 也不是 HBM 带宽瓶颈，而是指令发射与同步延迟受限，MTE2 与 V 的串行链是主要耗时。
 
-== 2. Double Buffer 流水
+== Double Buffer 流水
 #v(0.5em)
 
 最终版（V13）在评测 shape 下每核 8 行、恰好 1 个 chunk，不存在跨 chunk 的
 双缓冲；其加速来自消除逐行队列 API 与同步开销。早期版本（V4/V5）使用
-`TQue` 的 `BUFFER_NUM=2` 在 chunk 粒度做双缓冲，并用
-`msprof op simulator --soc-version=Ascend910B4` 验证：560×1024（每核 14 行、
+`TQue` 的 `BUFFER_NUM=2` 在 chunk 粒度做双缓冲，并用 `msprof op simulator --soc-version=Ascend910B4` 验证：560×1024（每核 14 行、
 2 chunks）的 core0 指令流显示 `MOV_OUT_TO_UB`（chunk2 输入，1047 cyc）与
 `MOV_UB_TO_OUT`（chunk1 输出，1047+685 cyc）并发执行，即 chunk 级 MTE2/MTE3
-确已重叠。该双缓冲是依赖 TQue 的 EnQue/DeQue 自动插入的事件实现的，并非显式
-编写依赖；本实验中也尝试过显式手动事件的多 tile 管线，但在本工具链下不稳定
-（见"未采用的方案"）。
+确已重叠。
 
-== 3. TQue 是否真实队列（Bonus）
+== TQue 是否真实队列
 #v(0.5em)
 
 `TQue` 不是硬件队列，而是编译期/运行期的"所有权与同步簿记"抽象。`EnQue` 把
 LocalTensor 在 UB 中的地址与一个事件 ID 登记进 TPipe 的队列记录，并在对应流水线
 上发出 `SetFlag`；`DeQue` 取出同一地址的句柄并发出对应的 `WaitFlag`。数据本身
-始终留在 UB 中，`EnQue/DeQue` 之间不发生任何拷贝或搬移。证据来自 CANN 8.5.0
-的 `kernel_tpipe_impl.h`：`EnQue` 只做地址登记与 `SetFlag<M_MTE1>` 等事件
-插入，`DeQue` 只做 `WaitFlag` 并返回句柄。这也是为什么队列簿记本身有标量开销：
-每次入队出队都要做事件分配与地址记录。
-
-== 4. Ascend 950PR 相比 910 系列的新特性（Bonus）
-#v(0.5em)
-
-950PR 于 2026 年 3 月发布，定位大模型推理 Prefill 与推荐，是第三代达芬奇架构
-（架构版本 3510）。相比 910B 系列，主要变化：
-
-+ 制程与封装：中芯 N+3（等效 5 nm 级）四芯片合封，国产化率超 90%；
-+ 内存：自研 HiBL 1.0 HBM，950PR 单卡 112 GB、带宽 1.4 TB/s（裸片 128 GB、
-  1.6 TB/s），950DT 后续升级到 144 GB、4 TB/s；
-+ 低精度：支持 FP4/FP8/MXFP8/MXFP4/HiF8，FP4 算力 1.56 PFLOPS；
-+ 编程模型：新增 SIMT 硬件单元与 RegBase 架构，Vector 计算从 MemBase 迁移到
-  RegBase，Vector 核 FP16/FP32 性能翻倍；
-+ 计算协同：Cube-Vector 融合通路，Cube:Vector 算力配比 8:1；
-+ 内存效率：核内 Buffer 访问颗粒度从 512 B 降到 128 B，小算子访存效率提升约 4 倍；
-+ 互联：灵衢 2.0，双向最大 2 TB/s，是 910C 的 2.5 倍。
-
-对本实验的启示：910B 的 Vector 指令必须读写 UB（MemBase），同步与搬运占了大头；
-950 的 RegBase 与小颗粒度内存访问会显著降低这类 element-wise 算子的同步与搬运
-开销，Cube-Vector 融合也有利于把规约类工作卸载到更宽的计算单元。
-
-== 5. 昇腾 NPU 使用体验（Bonus）
-#v(0.5em)
-
-体验整体"工具链完整、上手陡峭、细节脆弱"。完整的一面：`msprof op` 的流水占比
-与 `msprof op simulator` 的指令级流水图对定位串行化非常有效，本轮几乎每一步
-优化都由 profiling 证据驱动。陡峭的一面：Ascend C 需要显式管理 UB 布局、数据
-搬运与三流水同步，TQue 之外的手动 `SetFlag/WaitFlag` 与编译器 auto-sync、框架
-事件池的交互难以静态验证，本实验的多 tile 手动管线因此反复死锁（consume-on-wait
-语义 + 事件 ID 池冲突），最终只能退回单 chunk 结构。对比 NVIDIA 生态，CUDA 的
-异步拷贝与隐式依赖追踪让这类小算子更容易写出安全的高重叠实现；昇腾的显式事件
-模型性能上限更高、但正确性验证成本也更高。
+始终留在 UB 中，`EnQue/DeQue` 之间不发生任何拷贝或搬移。

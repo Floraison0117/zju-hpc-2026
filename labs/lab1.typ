@@ -3,10 +3,6 @@
 #show: show-cn-fakebold
 #set text(font: ("Palatino Linotype", "kaiti"))
 #set math.equation(numbering: "(1)")
-#set page(
-  header: align(right)[3240101033 曹绚],
-)
-
 #set page(numbering: "1")
 #set heading(numbering: "1.1")
 #show enum: it => {

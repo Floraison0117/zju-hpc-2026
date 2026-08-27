@@ -1,9 +1,0 @@
-case,correctness,median_ms
-short_tail_state,PASS,0.392368
-chain_equal,PASS,1.326384
-parallel_equal,PASS,1.397360
-parallel_gva,PASS,1.416880
-long_low_gva,PASS,10.675264
-batch_split_gva,PASS,9.908400
-wide_gva_state,PASS,19.044656
-deep_gva_state,PASS,20.027599

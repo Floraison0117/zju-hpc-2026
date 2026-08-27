@@ -799,3 +799,65 @@ cd ~/lab4-gpu && ./compile.sh
 关键结构差异（vs prolong3 P33）：prolong3 的 2 个 fine 成员共享**同一** 6-tap 窗口（anchor 相同，仅系数序不同）→ P33 8× load 削减；restrict3 的 2 个 coarse 成员窗口**错位**（[kf-2,kf+3] vs [kf,kf+5]，共享 4/6 taps/dim）→ union 8³=512 taps。**fused 版（不物化，tmp2 进寄存器）仅 1.5× 削减（1,152/8 输出 vs 216/输出）**，materialized 版 3.4× 但需 512 doubles 存储（registers 装不下 / smem 跨线程 race（p44 教训）/ local 流量爆炸）→ 与 4×4×4 同族死路。预期 -3~5s，effort/risk 不成比例，**本轮不做**。restrict3 的 ncu（L2 11%、long_scoreboard 2.13、1.04 waves）确认其 latency-bound 且 L2 远未饱和 → load 削减收益本就有限。
 
 **本轮最终部署栈**：部署基线（P313233 540.23s）+ **A38-1 fused-z → 534.31s**（唯一 keep）。其余全部死路/不可行/设计待实现。
+
+## 迭代39 R5-zroll L0：smem 场值暂存（milestone-B 49-double floor 假说），**死路（natural regs 仍 255，lb2 spill 仅 -4.1%）**
+
+**背景（用户授权算法级重构，round-5 主候选）**：milestone-B §2.2 分析 66-double live floor 含 17 场值；假说"场值移 smem（rolling window）→ floor 降至 49 doubles（98 regs）→ occupancy >25%"（此前从未实现）。任务要求先 L0 ptxas 验证 register floor 是否下降。
+
+**候选**：`~/lab4-gpu-cand-r5-zroll-20260827-110726`（patch `assets/lab4/opt/search/patch_r5_zroll_l0.py`：hash 守卫 8dc0cf28）。改动：从 bssn_rhs_gpu_int.cu 生成 `bssn_rhs_gpu_int_zr.cu`（kernel 改名 rhs_kernel_int_zr + 文件内 launcher 调用同步改名），17 场值（Lap/chi/gxx..gzz/trK/Axx..Azz）在 kernel 顶部 `__shared__ double s_f[17][256]` 暂存（34.8KB）+ `__syncthreads()`，顶部 17 个 point-value 读、Step-0 的 l_gxx..l_gzz/l_Axx..l_Azz 重读、Step-8 组装前重读全部改 smem 读（bit-exact by construction，同值同算术）。**注意**：probe kernel 保留 interior early-return（边界线程跳过 barrier，真实接线需 interior-only grid；L0 compile-only 不受影响）。
+
+**L0 ptxas（job 178072/178105/178118，同作业 apples-to-apples，-O3 -arch=sm_80 -rdc=true -lineinfo）**：
+
+| variant | regs | stack | spill stores | spill loads | smem |
+|---|---:|---:|---:|---:|---:|
+| base-lb2（部署态 int） | 128 | 736B | 2124B | 3176B | 0 |
+| base-lb3 | 80 | 1176B | 4924B | 7608B | 0 |
+| base-lb4 | 64 | 1536B | 7864B | 11608B | 0 |
+| base-nolb（natural） | **255** | 120B | 148B | 140B | 0 |
+| cand-zr-lb2 | 128 | 720B | **2036B** | **3008B** | 34.8KB |
+| cand-zr-lb3 | 80 | 1120B | 4724B | 7280B | 34.8KB |
+| cand-zr-lb4 | 64 | 1440B | 8240B | 11468B | 34.8KB |
+| cand-zr-nolb | **255** | 152B | 220B | 172B | 34.8KB |
+
+**裁决：死路（GATE FAIL）**。判定依据（任务 L0 门限：natural regs <128 或 lb2 spill 显著下降 → 有希望）：
+1. **natural regs 仍 255（sm_80 硬件上限）**：17 场值移 smem 未降 register floor。编译器把 smem 读结果照常物化进寄存器（场值在 Ricci 步骤经 l_gxx/l_Aij 仍存活，Step-2/3 使用），smem 只是换 load source，不缩短 live range。
+2. **lb2 spill 仅 -4.1%/-5.3%（2036/3008 vs 2124/3176）**：非"显著下降"（前门限如 ri_share 用 5%）。
+3. **nolb spill 反升**（148→220B）：barrier + smem 索引开销扰动 natural 分配。
+4. **+34.8KB smem → L1 carveout 缩小**（iter6 教训：2×54KB→L1 56KB → -5.9%），净负风险。
+
+**深层原因（诚实，与 iter9 P3 同源）**：milestone-B 的 "49-double floor" 分析漏了组装期瞬时值（fxx..fzz 6 + trK_rhs_val + val_Gamx_rhs 3 + matter 7 + l_Aij 6 + l_gxx 6 ≈ +35 doubles）→ 真峰值 ≈ 105 doubles（210 regs）+ fdderivs 61-fh 段 → 254-255 regs 是 BSSN 公式固有。**register floor 与 load source 无关，只与数据流有关**；smem staging 无法缩短 live range（场值在 Ricci 步骤必须存活）。
+
+**经验**：z-rolling（场值 smem 化）在点态内核上无法降 register floor；其 load-volume 削减面（stencil halo smem 复用）已被 iter6 测死（F=0.944）。**R3 主候选 L0 门禁杀，勿重试**。真实 z-rolling 全结构（column-per-thread + k-loop）也改变不了每点 66+35+61fh 的固有 live set（每 k 迭代计算完整 RHS，场值全程存活）。
+
+## 迭代40 R5-Ricci-ablation L0：Ricci Step-4 整段消融诊断，**确认峰值在 fdderivs 61-fh 段而非 Ricci 怪物（natural 255→254 仅 -1）**
+
+**目的（候选 #3 Lever B 重测前置诊断）**：P3（iter9）在 pre-interior 内核结论"峰值在 fdderivs 61-fh，非 Ricci 段"；thin interior 内核（30K 静态，lb2 spill 2124B）live-set 动态不同，需重测。先做消融：把 Step-4 六个 Ricci correction 怪物表达式替换为等输入集的平凡语句（全部输入 l_gxx..gzz/dGam/Gamxa/gup/l_Gam/gxxx..gzzz 各读一次，去除 120-term 表达式树深度），保持输入 live set 不变。
+
+**候选**：`patch_r5_ricci_ablate.py`（hash 守卫 8dc0cf28）生成 `bssn_rhs_gpu_int_ablate.cu`（kernel 名不变）。
+
+**L0 ptxas（job 178171/178190）**：
+
+| variant | regs | stack | spill stores | spill loads |
+|---|---:|---:|---:|---:|
+| base-lb2 | 128 | 736B | 2124B | 3176B |
+| ablate-lb2 | 128 | 696B | **1752B** | 2772B |
+| ablate-nolb | **254** | 120B | 136B | 136B |
+| base-nolb | 255 | 120B | 148B | 140B |
+
+**裁决：诊断完成，Lever B 重测判死**：
+1. **whole Ricci monster 消融后 natural 仅 255→254**（-1 reg）：即使完全移除 6 个 120-term 怪物，kernel 仍想要 254 regs → **register 峰值不在 Ricci 表达式树，而在 fdderivs 61-fh 段 + 累积 live set（场值/导数/几何层 ≈ 127 doubles）**。iter9 P3 结论在 thin kernel 上复现。
+2. lb2 spill -17.5%（2124→1752B）是消融上限：P3 式 contraction 分量级 recompute 只消 part of 峰值（旧 P3 pre-interior 仅 -30% Ricci 段 spill），且 **spill 降不转运行时收益**（iter9/iter14 先例：P3.5c spill 不变 F=1.0；P5 fh-float spill -8% F=0.99）→ 重测无意义。
+3. **结论：候选 #3（Ricci 分量级 recompute retest）在 thin kernel 上死路**（与 iter9 同结论，峰值仍在 fdderivs 段）。
+
+## 迭代41 R5 终审：RHS 算法级重构全族 L0 死路 + 90 分可达性定论
+
+**候选矩阵 L0 判定汇总（round-5）**：
+- **#1 z-rolling（R3 主候选）**：L0 GATE FAIL（natural 255 不变、lb2 spill -4.1%、+34.8KB smem carveout 风险）→ 死路（iter39）。
+- **#2 interior 2-way/3-way split（重测）**：未做单独 ptxas（分析判死）。milestone-B §2.1 G1-G5 分组 + iter39/40 证据：任何含 Ricci 的 kernel 必须持有 36 几何层（gup+l_Gam+l_R），组装段瞬时值（fxx..fzz/trK_rhs_val/Gam_rhs/matter）叠加后峰值 ≈ 105+ doubles 不可压；消融证实即使删光 Ricci 怪物仍 254 regs。旧 split v2/Lever A（pre-interior）kernel2 3880B spill 的同构结论在 thin kernel 上必然复现。**分析判死，未浪费构建**。
+- **#3 Ricci 分量级 recompute（Lever B retest）**：ablation 诊断确认峰值在 fdderivs 段（natural 255→254），recompute 机制上限 = 消融 -17.5% lb2 spill，且 spill 不转 runtime → 死路（iter40）。
+- **#4 数据流重排（DAG）**：与 #1 同构（缩短 live range 受 66+35+61fh 固有 live set 限制），smem/DAG 重排均无法低于 254 regs → 死路。
+- **#5 fallback tap-sharing**：设计在 `a38_tapsharing_design.md`（-10~25s），**本轮未实现**（RHS 全族 L0 已定论，tap-sharing 为次级目标；A38-1 fused-z 已部署后 analysis 新瓶颈未重测 ncu，前提待验证）。
+
+**90 分可达性定论（round-5 终审）**：真实 OJ 536.760s/85.20 分（A381）。90 分需 ≤461s（差 -76s）。RHS 369s 的算法级重构（z-rolling/split/recompute/DAG）全部 L0 死路——**register floor ≈254-255 regs 是 BSSN 公式固有（fdderivs 61-fh + Ricci 33+ 变量 + 组装瞬时值），任何 smem/split/recompute/重排均无法突破**。残余杠杆仅 tap-sharing（-10~25s → ~512-527s/86-87 分，仍差 90 分）。**结论：90 分在物理/诚信边界内不可达；85.2 分为当前实际极限**。部署态维持 A381（536.760s/85.20 分）。主 agent 决策：接受 85.2 分 or 续做 tap-sharing 至 ~87 分 or 停止。
+
+**证据**：`~/lab4-gpu-cand-r5-zroll-20260827-110726/evidence/r5-l0/`（ptxas-base/cand/ablate 全套 + job1-5.log）。

@@ -1,9 +1,0 @@
-case,correctness,median_ms
-2026-07-24 08:53:18  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_persistent_tensorcore` with `out_idx=None`
-2026-07-24 08:53:27  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_persistent_tensorcore`
-short_tail_state,PASS,0.477520
-long_low_gva,PASS,14.892784
-batch_split_gva,PASS,9.999520
-2026-07-24 08:53:30  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_persistent_tensorcore` with `out_idx=None`
-2026-07-24 08:53:39  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_persistent_tensorcore`
-chain_equal,PASS,1.937856

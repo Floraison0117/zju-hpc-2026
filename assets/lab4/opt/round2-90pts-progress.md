@@ -65,6 +65,37 @@
 - 部署后正式态：fmisc.h `9415328e` / fmisc_gpu.cu `ddbd2fcf` / bssn_rhs `9baee005`。提交包 9 项已清理。
 - 当前基线轨迹：605.78 → 540.23（P313233）→ **535.30s（A381）**。预测 ~85.1 分；90 分需 ≤461s，仍差 ~74s。
 
+## 第 5 轮：算法级重构（2026-08-27 10:05，用户授权）
+
+- 用户决策：**授权 RHS 算法级重构**（z 向滚动窗口 / 数据流重排 / 选择性重算）。
+- 验收放宽：check.sh FINAL PASS（RMS≤1e-3、约束≤2）即可，**bit-exact 非必须**（浮点重排可接受）。
+- 目标：OJ-sim ≤461s（90 分），工程预算 ≤450s。当前 536.8s，差 -76s（RHS 369s 需 ~1.2-1.3× 或组合）。
+- 关键设计背景：plan-340s-sprint.md Phase 2（R1-R4 候选）、milestone-B 分析（66-double live floor，但包含 17 场值——若移 smem 可降至 ~49 doubles）；interior 特化后内核已瘦（30K vs 124K 静态指令），**split 族值得在瘦内核上重测**（旧测试是 pre-interior）。
+- 红线：不改物理/网格/演化时间；不改 runner/timing/评测；不硬编码输出；check.sh FINAL 是硬门。
+
+## OJ 实测回填（2026-08-27 10:00）✅ 真实分数确认
+
+- **真实 OJ：GPU 85/120 · 536.760s**（scoreBeforeRounding=85.20075），trajectoryRMS=0（bit-exact），约束全 ≤2，100/100 time groups。sourceRevision `5b0edd5-r11`。
+- **模型校准**：预测 84.87 vs 实际 85.20，残差 +0.33（模型精确，±1.7 残差内）。
+- **校准后模型**：score = 297.95 − 33.90·ln(T)。90 分需 T≈461s（差 -76s）。
+- **OJ 轨迹**：1604/0 → 1228/55 → 1044/64 → 706/76 → 601.4/81 → **536.8/85.2（当前）**。
+- 部署栈全程 bit-exact：26bcd → P313233 → A381 fused-z。
+
+## 90 分可达性（校准后终审）
+
+- 真实曲线确认 log 模型精确（85.2 实测）。90 分需 461s，当前 536.8s，差 -76s（-14%）。
+- 残余杠杆：tap-sharing -10~25s（→ ~510s/87 分，仍不足 90）；无其他已知正收益单变量杠杆。
+- RHS 70%（369s）occupancy 被 66-double live floor 数学钉死 25%（milestone-B），算法级需授权。
+- **结论：>90 分在当前约束（不改物理/位级安全/不改 runner）内不可达；tap-sharing 只能到 ~87。需用户决策：算法级重构授权 / 接受 85 / 继续 partial。**
+
+## OJ 提交准备（2026-08-27 09:45，用户决定：先提交 OJ 实测）
+
+- 提交包 `~/lab4-gpu` 已验证就绪：9 项 / 102 文件 / 86 src，无 build/cache/evidence/__pycache__。
+- OJ 配置核对：MPI=1、OMP=8、GPU=yes、Final=100、Analysis=0.1、Dissipation=0.15 ✓。
+- sha256 清单：`~/lab4-gpu-submission-a381.sha256`（102 行），本地副本 `assets/lab4/opt/evidence-reprofile-20260826/lab4-gpu-submission-a381.sha256`。
+- 部署态实测：A381 OJ-sim 535.30s（check FINAL PASS RMS=0）。预测 ~85 分；真实 OJ 待用户上传后回填。
+- **待用户上传 OJ → 回填真实 scoreBeforeRounding → 校准评分模型 → 决定是否需继续 tap-sharing/算法级。**
+
 ## 主 agent 部署执行（2026-08-27 03:40-04:50）✅ 完成
 
 - **P313233 组合已部署并验证**：deploy 尝试 1（175173）因脚本清理步骤删除证据而不可见结果；deploy2（175289）build OK 但同样清理丢失日志；最终 verify job **175395** 证据完整：**OJ-sim 540.23s**（候选 L2 539.48s，误差 0.14%），check FINAL PASS RMS=0，约束逐位一致。证据 `~/p313233-verify-20260827-042840/`（job/build/run/check log）。
@@ -87,3 +118,12 @@
 ## 规则红线（本轮不变）
 
 - 不碰 labs/lab4.typ；不改 runner/timing/评测；不硬编码输出；formal 只读；主 agent 独占部署与 OJ 提交。
+
+## 第 5 轮子代理执行结果（2026-08-27 11:30，run 5）✅ 完成
+
+- **RHS 算法级重构 L0 全族死路**（证据 `~/lab4-gpu-cand-r5-zroll-20260827-110726/evidence/r5-l0/`）：
+  - **#1 z-rolling（R3 主候选）**：17 场值 smem 暂存（34.8KB + barrier）实测 natural regs 仍 255（hw cap）、lb2 spill 2124→2036B（仅 -4.1%）。milestone-B "49-double floor" 假说证伪：场值在 Ricci 步骤必须存活，smem 只是换 load source 不缩短 live range。**GATE FAIL**。
+  - **#3 Ricci 消融诊断**：整个 Step-4 怪物删除后 natural 仅 255→254、lb2 spill -17.5% → **峰值在 fdderivs 61-fh 段**（iter9 P3 结论在 thin kernel 复现），Lever B recompute 上限即此且 spill 不转 runtime → 死路。
+  - **#2 split / #4 DAG**：分析判死（任何含 Ricci 的 kernel 持有 36 几何层 + 组装瞬时 ≈105 doubles 不可压；消融证据 254 regs）。
+  - **结论：90 分（≤461s）在物理/诚信边界内不可达；85.2 分为实际极限**。部署态维持 A381（536.760s/85.20 分）。
+  - **fallback tap-sharing（-10~25s → ~87 分）**：设计已存 `a38_tapsharing_design.md`，本轮未实现（A38-1 fused-z 后 analysis 新瓶颈未重测 ncu，前提待验证；建议主 agent 决定是否续做）。
