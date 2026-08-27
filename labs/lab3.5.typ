@@ -3,9 +3,6 @@
 #show: show-cn-fakebold
 #set text(font: ("Palatino Linotype", "KaiTi"))
 #set math.equation(numbering: "(1)")
-#set page(
-  header: align(right)[3240101033 曹绚],
-)
 #set page(numbering: "1")
 #set heading(numbering: "1.1")
 #show enum: it => {
@@ -48,17 +45,13 @@
 = 实验目标
 #v(0.5em)
 
-本实验在华为昇腾 910B4 NPU 上实现并优化融合算子 FusedAddRmsNorm，要求保持给定
-接口与 FP16 输入输出不变，通过全部公开与隐藏正确性 case，并在评测配置
-$[256, 1024]$、FP16 下尽可能缩短 kernel 的 `Task Duration(us)`。评测以课程提供的
-Ascend C 基线性能为起始评分点，满分 120 分（其中 20 分为 Bonus）。本实验最终
-提交版本（`513c599c-r7`）通过全部正确性检查，官方评测 `Task Duration = 6.02 us`，
-得分 #strong[76/120]，相对课程基线加速 #strong[2.49 倍]。
+本实验在华为昇腾 910B4 NPU 上实现并优化融合算子 FusedAddRmsNorm。官方评测 `Task Duration = 6.02 us`，
+得分 #strong[76/120]，相对 baseline 加速 #strong[2.49 倍]。
 
 = 算子语义与硬件背景
 #v(0.5em)
 
-== FusedAddRmsNorm 计算语义
+== FusedAddRmsNorm
 #v(0.5em)
 
 设 $x$、`residual` 为 $B times H$ 的 FP16 张量，$w$ 为 $H$ 维 FP16 权重。对每一行
@@ -68,8 +61,7 @@ $ R_b = x_b + "residual"_b, quad "rms"_b = sqrt(1/H sum_(i=0)^(H-1) R_(b,i)^2 + 
 $ y_b = R_b / "rms"_b dot.op w, quad "residual_out"_b = R_b $
 
 其中 $epsilon = 10^(-6)$。算子同时输出 `y` 与 `residual_out` 两个 $B times H$ 张量。
-正确性判据为逐元素 $|o_i - g_i| <= 10^(-3)$ 或相对误差 $<= 10^(-3)$，且要求整张量
-错误元素比例为 0。Golden 在 FP32 下计算，最后转 FP16。
+正确性判据为逐元素 $|o_i - g_i| <= 10^(-3)$ 或相对误差 $<= 10^(-3)$。
 
 == 昇腾 910B 达芬奇架构要点
 #v(0.5em)
@@ -92,103 +84,16 @@ $ y_b = R_b / "rms"_b dot.op w, quad "residual_out"_b = R_b $
     [Scalar 单元], [-], [标量运算、地址计算、控制流],
     table.hline(stroke: 1pt),
   ),
-  caption: [910B4 AIV 核关键资源（课程文档）],
+  caption: [910B4 AIV 核关键资源],
 )
 
 MTE2、V、MTE3 三条流水线相互独立，可以并行；同步通过 `TQue` 队列语义自动插入的
 事件或显式 `SetFlag/WaitFlag` 完成。Vector 指令必须操作 UB 上的数据，FP32 按
-256 B/次处理 64 个元素，FP16 处理 128 个元素，32 B 对齐（FP16 16 元素、FP32 8
-元素）是向量指令与搬运的基本粒度。
+256 B/次处理 64 个元素，FP16 处理 128 个元素，32 B 对齐是向量指令与搬运的基本粒度。
 
-= 开发路径与环境
-#v(0.5em)
+选择 #strong[Ascend C] 开发路径。
 
-选择 #strong[Ascend C] 开发路径（课程鼓励路径，可细粒度控制同步与流水，且仅该路径提供
-基线实现）。开发调试在 `zju-hpc-910`（Ascend 910B4，32 GB HBM，CANN 8.5.0，
-Python 3.11.14），NPU 任务经 `hpc submit` 提交到 `lab3p5` 分区。
-
-#codeblock[
-```bash
-# 正确性：运行全部公开 case（checker/ 只做正确性检查）
-hpc submit -p lab3p5 bash checker/run.sh
-# 性能：固定 shape [256,1024]，msprof op --warm-up=10，输出一次 Task Duration(us)
-hpc submit -p lab3p5 bash checker/profile.sh
-# 详细 profiling（scratch 包装，不改 checker）
-hpc submit -p lab3p5 bash scratch/prof_detail.sh op_prof_xxx --aic-metrics=Default
-# simulator：观察指令流水与同步事件
-hpc submit -p lab3p5 bash scratch/sim.sh 3
-```
-]
-
-性能口径与课程评分一致：`checker/profile.sh` 固定评测 case 2（$256 times 1024$），
-用 `msprof op --warm-up=10 --launch-count=1` 采集并输出单次 `Task Duration(us)`。
-
-= 评分曲线与性能基线
-#v(0.5em)
-
-== 评分曲线标定
-#v(0.5em)
-
-课程页面给出性能评分曲线（横轴 kernel 耗时，纵轴得分，对数曲线），并对图像做像素级
-标定与 OCR（Python/PIL + RapidOCR），得到三个标注点：基线 15 us 对应 0 分，
-4.5 us 对应 100 分，3.5 us 对应 120 分（Bonus 20 分）。三点位于同一条对数曲线上：
-
-$ "score"(T) = 100 ln(15/T) / ln(15/4.5) approx 83.058 ln(15/T) $ <score>
-
-其中 $T$ 为 case 2 的 `Task Duration(us)`。由该曲线，90 分对应的耗时阈值为
-$T < 15 exp(-90/83.058) approx 5.08 "us"$。
-
-#figure(
-  align(center,
-    box(
-      width: 100%,
-      height: 6.4cm,
-      {
-        // 坐标映射: T in [3.5,15] -> dx; score in [0,130] -> dy（y 向下增长）
-        let X(t) = 26pt + (t - 3.5) / (15 - 3.5) * 300pt
-        let Y(s) = 5.7cm - s / 130.0 * 5.1cm
-        // 坐标轴（每个曲线元素用 place 放到盒子原点，坐标即盒子坐标）
-        place(dx: 0pt, dy: 0pt, curve(stroke: 0.9pt + black,
-          curve.move((X(3.5), Y(0))), curve.line((X(15), Y(0)))))
-        place(dx: 0pt, dy: 0pt, curve(stroke: 0.9pt + black,
-          curve.move((X(3.5), Y(0))), curve.line((X(3.5), Y(130)))))
-        // 刻度与刻度值
-        for t in (4, 6, 8, 10, 12, 14) {
-          place(dx: 0pt, dy: 0pt, curve(stroke: 0.5pt + gray,
-            curve.move((X(t), Y(0))), curve.line((X(t), Y(-6)))))
-          place(dx: X(t) - 8pt, dy: Y(0) + 2pt, text(size: 7pt, [#t]))
-        }
-        for s in (30, 60, 90, 120) {
-          place(dx: 0pt, dy: 0pt, curve(stroke: 0.5pt + gray,
-            curve.move((X(3.5), Y(s))), curve.line((X(3.5) - 7pt, Y(s)))))
-          place(dx: X(3.5) - 20pt, dy: Y(s) - 5pt, text(size: 7pt, [#s]))
-        }
-        place(dx: X(14.0), dy: Y(-18), text(size: 8pt, [$T$ / $mu s$]))
-        place(dx: X(2.4), dy: Y(128), text(size: 8pt, [得分]))
-        // 评分曲线: score(T) = 83.058 ln(15/T)
-        let pts = ()
-        for i in range(0, 24) {
-          let t = 3.5 + i * 0.5
-          pts.push((X(t), Y(83.058 * calc.ln(15.0 / t))))
-        }
-        pts.push((X(15), Y(0)))
-        place(dx: 0pt, dy: 0pt, curve(stroke: 1.3pt + rgb("#1f5fa8"),
-          curve.move(pts.at(0)), ..pts.slice(1).map(curve.line)))
-        // 标注点
-        for (t, s) in ((15, 0), (4.5, 100), (3.5, 120), (6.02, 75.8)) {
-          place(dx: X(t) - 3pt, dy: Y(s) - 3pt, box(width: 6pt, height: 6pt, radius: 50%, fill: rgb("#c0392b")))
-        }
-        place(dx: X(14.2) - 40pt, dy: Y(-16), text(size: 8pt, [基线 15 us, 0 分]))
-        place(dx: X(4.8) - 12pt, dy: Y(104), text(size: 8pt, [100 分]))
-        place(dx: X(3.6) - 12pt, dy: Y(122), text(size: 8pt, [120 分]))
-        place(dx: X(6.5) - 30pt, dy: Y(78), text(size: 8pt, [本实验 6.02 us, 76 分]))
-      },
-    ),
-  ),
-  caption: [评分曲线与实验结果位置（标定自课程页面 score.png，公式见 @score）],
-)
-
-== 基线实现与测量
+= 性能基线
 #v(0.5em)
 
 课程提供的 Ascend C 基线（下称 V0）按行处理：`inQueX/inQueRes`（FP16，双缓冲）、
@@ -403,7 +308,7 @@ $B=1$ 单核、极小 H=3/8、$[-1000, 1000]$ 大范围数据），全部 PASS�
     [正确性], [5/5], [5/5 + 22 隐藏 PASS], [官方评测通过],
     [case2 中位 / us], [15.01], [6.28], [本机 `checker/profile.sh`],
     [官方 Task / us], [约 15], [6.02], [OJ 评测 `513c599c-r7`],
-    [官方得分], [0], [76/120], [评分曲线 @score],
+    [官方得分], [0], [76/120], [课程评分曲线（基线 15 us 对应 0 分，满分 120）],
     table.hline(stroke: 1pt),
   ),
   caption: [最终结果汇总],
