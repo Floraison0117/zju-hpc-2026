@@ -1,0 +1,1321 @@
+HPC101: Algorithm-Infra Co-Design for AGI
+
+            Presenter: Bohan Zhuang
+
+                PI of ZIP Lab @ Zhejiang University
+Overview
+
+    Part 1   Part 2     Part 3       Part 4
+Background  Training  Inference  Agent Loop
+
+                                     Part 5
+                                 Future Work
+Part 1 - Background of Large Foundation Models
+Background - Evolution of Foundation Models                                                                             Post-ChatGPT: Reasoning & Agentic Frontier
+
+                                                                    Architecture & Pre-training Breakthroughs
+
+ 2012            2015                 2018                                                                      2022                    2025
+
+AlexNet          ResNet               BERT                                                                     ChatGPT               Gemini 3 / o-
+                                                                                                                                         series
+
+          2014              2017            2020                                                                            2024                         2026
+
+         VGGNet          Transformer         ViT                                                                        DeepSeek-V3                 Claude Fable 5 /
+                                                                                                                                                         GPT-5.6
+
+From architecture races (CNN  Transformer) to scale races (pre-training) to agentic, self-evolving races -- each era
+compounds on the last.
+Background - The Industry Is Token Maxing
+
+3.2 Quadrillion                 15B / minute                                                                             1.5Q  120Q /mo
+
+        tokens / month       OpenAI API throughput (~21.6T/mo)                                                         industry agent+LLM tokens, 20262030
+
+           Google, I/O 2026                 up 50x since 2023                                                                          24x projected growth
+
+100B                         Case in point (OpenAI, June 2026):
+  tokens / month             its single largest enterprise customer now burns 100 billion tokens per month -- the industry is maxing out
+                             tokens, and throughput, not model count, is the new usage currency.
+
+Everyone is token maxing -- token efficiency & productivity are the new moat.
+
+Sources: Google I/O 2026; OpenAI API metrics, Mar 2026; S. Altman, Jun 2026; Goldman Sachs agentic AI forecast, 2026.
+Background - Scaling Laws and the Data Flywheel
+
+Pre-training loss (log)        Pre-training Scaling Law                              AIME 2024 accuracy (%)  Test-Time Scaling Law
+                                                                                           100
+      GPT-2 1.5B ('19)                                                                                                              o3 96.7
+                                                                                             75                          DeepSeek-R1 79.8
+                                                                                                                o1 74.4
+
+                                     Chinchilla 70B ('22)                            50  o1-preview 44.6
+
+                               GPT-3 175B ('20)                GPT-4 ('23)           25                         o1 ('24.09): AIME accuracy  log(test-time compute)
+                                                       GPT-4.5 / Grok 3 ('25)                                   o3: ARC-AGI 75.7%  87.5% with 172× compute
+      2024­25: high-quality web data                                                                            R1 ('25.01): long CoT emerges from pure RL
+      nearly exhausted  gains shift to
+      synthetic data
+
+                                                                                         GPT-4o 9.3
+
+1021                     1022  1023              1024               1025       1026
+
+                               Training compute, FLOPs (log scale)                                           Test-time compute / "thinking" tokens (log scale)
+
+                                                                          Self-Evolving Data Flywheel
+
+              DATA                                           MODEL                       AGENT DEPLOYMENT                     NEW DATA
+        (pre-training +                                  (pre-training +                    (real-world tasks)               (interactions,
+      agent-generated)                                 test-time scaling)                                                feedback, self-play)
+
+More agent interactions  more data  better models  more capable agents: pre-training, test-time, and the data flywheel
+compound into accelerating growth.
+Background - The Four Elements of Efficiency
+
+   Infra,                             Infra  Evaluation                                                      Hardware and algorithm
+   AI accelerator             Data                                                                           co-design
+
+    Eg, vLLM, verl, Groq [3]                                                                                 Eg, FlashAttention [2],
+                                                                                                             DeepSeek-V4
+  Distributed computing,
+                                             Model                                                                       Efficient architecture and
+  Eg, FSDP, Megatron                                                                                                     module
+
+Data compression                                                                                                             Eg, Mamba, MoE
+
+Eg, Tokenizer                                                                                                        Scaling law
+
+                                                                                                                       Eg, LLM is compressor [1].
+
+                                                                                                             Recaptioning, Data filtering
+
+                                                                                                             Eg, DALLE-3, Recap-DataComp-1B
+
+[1]: Delétang et al., Language Modeling Is Compression, ICLR 2024.                                           Model compression
+[2]: Dao et al., FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness, NeurIPS 2022.
+[3]: https://groq.com/                                                                                       Eg, Pruning, Quantization, Distillation
+The Triangle in MLSys -- Compute, Memory, and Communication
+
+                                        COMPUTE
+                                 GPUs / TPUs, FLOPs
+
+HBM / KV-cache / checkpoint I/O                                                        Interconnect (NVLink / IB)
+  must keep pace with compute                                                        bandwidth must match FLOPs
+
+                                 All three must scale together
+
+              MEMORY             Sharded storage over the network trades memory for      COMMUNICATION
+SRAM/DRAM/SSD, KV-cache,                            communication (ZeRO)             PCIe, NVLink, InfiniBand
+
+            checkpoints
+
+A bottleneck in any one of compute, storage, or communication throttles the whole system.
+What are Agent and Harness?
+
+ · Agent = Model + Harness
+
+ · Code is a universal language for defining programs and systems
+
+ · A Harness is code that programs how prompts, tool calls, subagents, control flow, memory, and workflow
+    logic work together.
+Case study: Coding Agent Harness
+
+                  The core interface of mainstream coding agents across Claude Code, Codex, OpenCode, and Cursor-style agents
+Bi-level Optimization: Harness-Level & Model-Level
+
+       · Harness-level (white-box) optimization is fast and cheap; model-level (black-box) updates are slow and expensive
+An Interesting Loop
+Task Categories            Multimodal Understanding  Multimodal Generation
+                           Perception & reasoning    Image & video
+         Text-Only LLM
+         Coding & Chatbot  · GPT-5.6 (vision)        · Nano Banana pro
+         · DeepSeek-V3/V4  · Gemini 3                · Nano Banana pro
+                           · Qwen3-VL                · FLUX.2
+                           · Claude Sonnet 5         · Midjourney v7
+                           · LLaVA-Next              · Seedance 2.0
+                                                     · Kling 3.0
+                                                     · Wan 2.6
+                                                     · Hunyuan-World
+
+From pure text to multimodal understanding and generation -- the task frontier keeps expanding outward.
+Unified (Omni) Model
+
+                                                     https://research.nvidia.com/labs/cosmos-lab/cosmos3/
+                             Part 2 ­ Training
+
+Understanding Training from the Beauty of Data, Algorithm & Infra Co-design
+Training - Data Curation Pipeline
+
+Raw sources               Dedup              Quality filter        Decontaminate           Synthetic gen           Mix & curriculum
+
+web, code, books,  MinHash + exact match  model-based classifiers  strip benchmark leaks  rewrite, textbooks, QA,  domain weights, staging
+       papers                                                                                         CoT
+
+Pre-training data mix at the frontier                                                                                  <10%
+                                                            Synthetic data >90%                                    curated real data
+
+Data curation is now model-in-the-loop: LLMs filter, rewrite, and generate most of what the next model learns.
+Training - Data Curation
+
+    Data efficiency is highly important.
+    Data quality, diversity and quantity matter.
+    Tokenizer is very important.
+Optimizers: from Adam to Muon
+
+AdamW - the default workhorse                   Muon - matrix-aware optimization
+                                                orthogonalizes the momentum update via Newton­Schulz
+Adaptive per-parameter step size from gradient  iteration
+moments
+m  1m + (1-1)g v  2v + (1-2)g²                  2× compute efficiency: AdamW-level loss at ~52% of the
+   - ·m / (v + ), decoupled weight decay        training FLOPs
+Robust across scales - the default since GPT-3
+                                                MuonClip stabilized Kimi K2: 1T-param MoE, 15.5T
+                                                tokens, zero loss spikes
+
+A better optimizer is free compute: Muon reaches AdamW-quality loss with roughly half the training FLOPs.
+
+Go deeper - optimization resources
+Convex optimization: Boyd & Vandenberghe, Convex Optimization
+Stochastic optimization: Bottou, Curtis & Nocedal, Optimization Methods for Large-Scale Machine Learning, SIAM Review 2018
+Muon in practice: Keller Jordan's Muon blog (2024); Moonshot AI, Muon is Scalable for LLM Training (2025)
+
+[1] Kingma & Ba, Adam, ICLR 2015. [2] Jordan et al., Muon, 2024. [3] Liu et al., Muon is Scalable for LLM Training, arXiv 2025. [4] Kimi Team, Kimi K2: Open Agentic Intelligence, 2025.
+Architecture
+
+              Efficient Training & Inference:
+                dynamically activate a few experts
+                    for each token
+                671B parameters, of which 37B
+                    are activated for each token.
+Architecture
+
+                                                                           DSA
+
+                                                                          GDN
+
+Hybrid Architecture ():
+   Two hybird strategies: 1. Full Attention with Sparse Attention (SWA, DSA, etc). 2. Full
+       Attention with Linear Attention (GDN, KDA, etc)
+   Reduce the memory and computation overhead brought by long context
+Efficient Training - Parallelism Strategies
+
+                                                            
+
+ (DP / ZeRO /  batch  GPU; ZeRO/FSDP       ;;               (); all-reduce 
+FSDP)                                                       
+
+ (TP)                                      ;                , NVLink ;
+
+ (PP)           stage                      ;                ; micro-batch (1F1B
+ (EP)          MoE  GPU                                     interleaved);stage 
+
+                                            FLOPs/token ;   all-to-all ;
+                                            MoE
+
+/ (CP)         (Ring / Ulysses attention)   token ;          attention ; KV 
+
+Frontier runs compose them: DP × TP × PP × EP (+ CP) - "4D/5D parallelism" tuned to the interconnect topology.
+
+[1] Shoeybi et al., Megatron-LM, 2019. [2] Rajbhandari et al., ZeRO, SC 2020. [3] Zhao et al., PyTorch FSDP, VLDB 2023. [4] Lepikhin et al., GShard, ICLR 2021.
+Efficient Training - Parallelism Strategies
+
+DP: Split across batch dimension            PP: Split across model layers
+
+TP: Split every weight / activation matrix  EP: Split across experts
+                                            CP: Split across sequence (Ring) or attention head (Ulysses)
+Parameter-Efficient Fine-Tuning - LoRA & QLoRA
+
+                                                                   LoRA: freeze pretrained W0; learn a low-rank update W = BA with rank r <<
+                                                                   d, so h = W0x + BAx
+                                                                   Up to 10,000× fewer trainable parameters and 3× less GPU memory (GPT-3
+                                                                   175B)
+                                                                   Merge W0 + BA after training  zero extra inference latency
+                                                                   QLoRA: LoRA on a 4-bit quantized base - fine-tune a 65B model on one
+                                                                   48GB GPU
+
+             LoRA reparametrization: only A and B are trained [1]
+
+     Adapt a large model by training <1% of its weights - near full fine-tuning quality at a fraction of the cost.
+
+        [1] Hu et al., LoRA: Low-Rank Adaptation of Large Language Models, ICLR 2022. [2] Liu et al., DoRA: Weight-Decomposed Low-Rank Adaptation, ICML 2024. [3] Dettmers et al., QLoRA, NeurIPS
+        2023.
+Pre-training Frameworks - FSDP, Megatron, DeepSpeed
+
+                                                                      
+PyTorch FSDP2
+               :  /  /                                PyTorch ; torch.compileTP ; fused kernel ; 
+               (ZeRO-3 , DTensor)
+                                                      ;               
+
+Megatron-LM /  NVIDIA :TP / PP / DP / EP / CP +        MFU ;100B-1T   ;  NVIDIA
+Megatron Core  fused kernel + FP8 Transformer Engine  (NemotronGLM )
+
+DeepSpeed      ZeRO-1/2/3 + CPU/NVMe offload,MoE  ; offload ; HF      ;;
+                                                                      Megatron
+                                                      
+
+Megatron for max MFU at scale; FSDP / TorchTitan for PyTorch-native flexibility; DeepSpeed for tight memory.
+
+[1] Zhao et al., PyTorch FSDP, VLDB 2023. [2] Shoeybi et al., Megatron-LM, arXiv 2019. [3] Rasley et al., DeepSpeed, KDD 2020. [4] Liang et al., TorchTitan, ICLR 2025.
+Post-training - SFT, RL, and On-Policy Distillation             RL ~20%    OPD ~10%
+
+     Typical share of post-training effort at frontier labs
+                                                      SFT ~70%
+
+                                                                         On-policy?  / 
+
+SFT                                      token  (Forward                   /
+            
+Offline RL                                       KL)
+
+DPO                                               /  reward                /
+            
+Online RL
+            "          policy rollout   reward    outcome  reward          /
+PPO / GRPO   Agent "                             (Reverse KL)
+
+OPD         teachers                   teacher   token  teacher            /
+
+                                        logits   (Reverse KL)
+
+On-policy data is the key variable: training on the model's own samples keeps updates near the current policy and prevents
+catastrophic forgetting [1].
+
+[1] nrehiew, A Distributional View of Post-Training: SFT, RL, OPD, 2025. https://nrehiew.github.io/blog/sft_rl_opd/
+Scalable RL infra
+
+       System      Scheduler     Inference       Training            Characters
+VeRL (HybridFlow)      Ray    vLLM/SGLang   FSDP/Megatron
+                       Ray                                          
+     OpenRLHF                      vLLM       DeepSpeed
+                                                                 RL
+                                  SGLang                        RayvLLM
+                              vLLM/SGLang
+                                                                       
+                                  SGlang
+AReal (RealHF)     Custom          vLLM             Megatron    Rollout, 
+      ROLL           Ray                    DeepSpeed/Megatron     RL
+
+      Slime          Ray                            Megatron    Agent
+    Nemo RL          Ray                            Megatron    function calling
+
+                                                                          
+
+                                                                     
+                                                                   Lightweight
+
+                                                                 Nvidia
+Slime ­ Minimalist Engineering Aesthetics
+
+     slime = Megatron training + SGLang rollout + data buffer: sync or fully async agentic RL (used for GLM-4 and 5).
+
+        [1] THUDM, slime: an SGLang-native post-training framework for RL scaling, github.com/THUDM/slime.
+Training Infra vs. Inference Infra
+
+                    
+                     +  + 
+                    Prefill  + Decode  + 
+                    MFU TTFTTPOT
+Agentic RL Infra
+
+                  Agentic RL infra
+
+Rollout           :LLM   / , 
+
+Reward            :
+
+                   rollout ; rollout partial rollout
+
+                   +  GPU
+
+                  sandbox:I/O 
+
+                  trainer   GPU 
+
+Agentic RL is a distributed-systems problem: decouple rollout from training and keep GPUs busy.
+
+[1] OpenRLHF, Asynchronous RL and Agent RL (docs). [2] Shang et al., rStar2-Agent Technical Report, arXiv 2025.
+                   Part 3 - Inference
+
+Understanding Inference from the Beauty of Algorithm & Infra Co-design
+Background - Self-Attention in Transformers
+Inference Latency and Memory of LLMs
+
+                                                                                     Efficiency bottleneck
+
+Computation-bound  Memory-bound
+
+Zhou et al., A Survey on Efficient Inference for Large Language Models, arXiv 2024.
+Efficient Inference - Overview
+
+   Low-bit      Efficient       Sparsity   Efficient    Distillation
+Quantization   Attention                  Decoding
+              Mechanism                   Paradigm
+
+              Principle: Algorithm and Infra Co-design
+Inference: low-bit quantization
+Low-bit Quantization Background
+
+    Neural network quantization maps high-precision weights and activations to low-bit representations--such as
+    INT8/INT4 or FP8/FP4--reducing memory footprint and bandwidth while enabling matrix multiplications to run
+    efficiently on low-precision integer or floating-point hardware.
+
+                                                                                                          Lower Power Consumption
+                                                                                                                Lower Storage
+
+                                                                                                               Lower Latency
+                                                                                                            Lower Communication
+
+                                                                                                                    Bandwidth
+Quantization Formats: Binary/Ternary vs. Integer vs. Floating-Point
+
+    Binary (1-bit): a single scale  × the sign
+
+    Fixed-point INT-b: uniform grid -- zero-point-free (symmetric) vs. zero-point (asymmetric)
+
+    Floating-point FP4 (NVFP4, E2M1): logarithmic grid + two-level scaling
+
+    1 bit keeps only the sign; INT spreads its 2 levels uniformly (the zero-point z shifts the grid); FP spreads them logarithmically --
+    dense near zero, where values cluster.
+
+       [1] Rastegari et al., XNOR-Net, ECCV 2016. [2] Jacob et al., Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference, CVPR 2018. [3] NVIDIA, Pretraining Large Language
+       Models with NVFP4, 2025.
+Example: Integer-Only Networks & Ternary Networks for Edge Devices
+
+AQD -- fully-quantized object detection (CVPR 2021 Oral)               FATNN -- fast & accurate ternary networks (ICCV 2021)
+
+Pure integer network: conv, BN, and detection heads all run in fixed-  Ternary {-1, 0, +1}: inner product re-designed into two parallel bitwise ops -- 2× lower
+point -- no float ops left at inference                                complexity than 2-bit fixed-point
+
+Huge Kernel                                                            Same energy budget, more accuracy: closes the gap to full precision on ImageNet
+                                                                       Half a year C++ and OpenCL implementation: for binary/ternary/2-bit fixed-point quant
+Result: 4-bit FCOS matches its full-precision counterpart on COCO
+
+                                                                                                                                       Layer-wise speedup: ternary (FATNN) vs. 2-bit, on Qualcomm 821 / 835 and RTX 2080 Ti
+
+Integer-only (AQD) and ternary (FATNN) arithmetic make low-bit networks edge-deployable without accuracy loss.
+
+    [1] Chen, Liu, Zhuang, Tan, Shen. AQD: Towards Accurate Fully-Quantized Object Detection. CVPR 2021 (Oral).
+    [2] Chen, Zhuang, Shen. FATNN: Fast and Accurate Ternary Neural Networks. ICCV 2021.
+NVFP4: 4-Bit Floating Point Across Training and Inference
+
+Two-level scaling -- a fine ruler per 16 values, a global trim per tensor
+
+       FP32 per-tensor scale (global range)                                                  3×    peak inference throughput vs. FP8 on
+                                                                                                   Blackwell
+
+NVFP4                                                                      FP8 scale (E4M3)
+       16 × FP4 (E2M1) elements -- one micro-block
+                                                                                             1.9×  faster pretraining than FP8 (Llama-3.1
+MXFP4                                                                                              405B run)
+
+                                                                           E8M0 scale (2)
+
+32-value block, coarse power-of-two scale  ~88% higher quantization error
+
+E2M1 = 15 values: {0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6} -- ~4.5 bits/value incl. scales        <1%   accuracy drop: DeepSeek-R1 PTQ to
+                                                                                                   NVFP4 vs. FP8 (MMLU-Pro 8584)
+W4A4 GEMM on Blackwell: weights and activations both 4-bit  up to 4× throughput, ¼
+memory traffic vs. BF16                                                                      +36%  training tokens MXFP4 needs to
+                                                                                                   match NVFP4's loss
+Adopted by design: DeepSeek-V4 trains its 1.6T MoE expert weights in FP4 (QAT); GPT-
+OSS experts use MXFP4
+
+Production stack: TensorRT-LLM + TransformerEngine fused quantize-GEMM kernels;
+
+Two-level scaling makes 4-bit nearly lossless: FP8-level accuracy at up to 3× the throughput.
+
+[1] NVIDIA, Introducing NVFP4 for Efficient and Accurate Low-Precision Inference, 2025. [2] Huang et al., Pushing Intelligence to 4-bit, NVIDIA Research (EAI) blog, June 2026.
+Low-bit Quantization for LLMs
+Outlier issues in Post-training Quantization
+
+   Activation channel outliers emerge when scaling up beyond 6.7B parameters.
+   The activation outliers in specific channels make existing quantization methods less effective.
+
+   Tim et al., LLM.int8(): 8-bit matrix multiplication for transformers at scale, NeurIPS 2022.
+   Xie et al., SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models, ICML 2023.
+Dealing with Activation Outliers in LLMs
+
+      LLM.int8()      SmoothQuant (Xiao et al., 2023),        QLLM (Liu et al., 2024),                                                                  SageAttention
+ (Tim et al., 2022),  Outlier Suppression+ (Wei et al.,  OmniQuant (Shao et al., 2024),                                                             (Zhang et al., 2025),
+Outlier Suppression   2023), RPTQ (Yuan et al., 2023),
+ (Wei et al., 2022)                                         Atom (Yilong et al., 2024),                                                                SageAttention2
+                         FPTQ (Li et al. 2023), QUIK     QuaRot (Ashkboos et al., 2024),
+                             (Ashkboos et al. 2023)                                                                                                 (Zhang et al., 2025)
+                                                           SpinQuant (Liu et al., 2024)
+
+2022                  2023                                                                                                                    2024  2025
+
+Tim et al., LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale, NeurIPS 2022.
+Wei et al., Outlier suppression: Pushing the limit of low-bit transformer language models, NeurIPS 2022.
+Xiao et al., SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models, ICML 2023.
+Wei et al., Outlier suppression+: Accurate quantization of large language models by equivalent and optimal shifting and scaling, EMNLP 2023.
+Yuan et al., Rptq: Reorder-based post-training quantization for large language models, arXiv 2023.
+Li et al., Fptq: Fine-grained post-training quantization for large language models, arXiv 2023.
+Ashkboos et al., Towards end-to-end 4-bit inference on generative large language models, arXiv 2023.
+Liu et al., QLLM: Accurate and Efficient Low-Bitwidth Quantization for Large Language Models, ICLR 2024.
+Shao et al., Omniquant: Omnidirectionally calibrated quantization for large language models, ICLR 2024.
+Zhao et al., Atom: Low-bit quantization for efficient and accurate llm serving, MLSys 2024.
+Ashkboos et al., Quarot: Outlier-free 4-bit inference in rotated llms, arXiv 2024.
+Liu et al., SpinQuant--LLM quantization with learned rotations, arXiv 2024.
+Zhang et al., SageAttention: Accurate 8-Bit Attention for Plug-and-Play Inference Acceleration, ICLR 2025.
+
+Zhang et al., SageAttention2: Efficient Attention with Thorough Outlier Smoothing and Per-thread INT4 Quantization, ICML 2025.
+Low-bit Model Quantization for LLMs
+
+ LLM.int8() [Dettmers et al., 2022]:
+ Outliers: FP16
+ Others: INT8
+
+SmoothQuant [Xiao et al., 2023]:
+
+  Xiao et al., SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models, ICML 2023.
+  Tim et al., LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale, NeurIPS 2022.
+Rotary Quantization ­ QuaRot & SpinQuant
+
+                                                                                      Rotation Invariant
+
+Liu et al., SpinQuant: LLM quantization with learned rotations, ICLR 2025.                   QuaRot: random
+Ashkboos et al., QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs, NeurIPS 2024.             orthogonal
+
+                                                                                             SpinQuant: learned
+                                                                                                 orthogonal
+
+                                                                                      For example, R can be
+                                                                                      Walsh-Hadamard transform
+Efficient Attention
+Attention for Efficient Inference: Three Families
+
+Challenges:  1: Heavy KV Cache for long context
+             2: O(n2) computation complexity
+
+Softmax Attention                            Linear Attention                             Sparse Attention
+
+exact · O(N²) compute, IO-optimized          recurrent · O(N) time, O(1) state            select tokens · O(N·k) compute
+
+FlashAttention v1-v4: tiling +               Kernelized / RNN form: replace softmax       Attend only where it matters: trainable
+recomputation -- exact attention, no N×N     with a decaying state -- constant memory     block/token selection
+matrix in HBM                                per token                                    Models: DeepSeek DSA (V4), MoBA (Kimi);
+Quality gold standard; KV cache still grows                                               KV-selection at decode: Quest, H2O
+with context                                 Models: Mamba series, RWKV series, Gated     Near-full quality at a fraction of prefill
+                                             DeltaNet (Qwen3.5 series), Kimi Linear,      FLOPs and KV reads
+                                             MiniMax lightning attention
+
+                                             Cheap long context, but weaker exact recall
+                                              used in hybrids
+
+Default in every serving stack               Hybrid layers in frontier LLMs               Long-context prefill workhorse
+FlashAttention: IO-Aware Exact Attention
+
+SRAM() 19 TB/s · ~20 MB ~10×                                        HBM 1.5­2 TB/s · 40 GB                    attention  memory-bound
+
+ Attention: HBM                                                             FlashAttention:(Tiling) SRAM 
+
+                                                                 S                                                     
+
+            S = QKT
+
+ P = softmax(S)   S, P                                               HBM                                      HBM   O    SRAM()
+    O=PV            P
+                                                                     S:N×N                                  QKV               
+
+                                                                     P:N×N                                  ()         QKTsoftmax×V
+                                                                                                                            
+
+SP  O(N²), Q/K/V  O(Nd)(Nd)                                                 N×N  SP  HBM,
+  HBM ,                                                                      SRAM
+
+                                                                     HBM !
+
+[1] Dao et al., FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness, NeurIPS 2022.
+FlashAttention: IO-Aware Exact Attention
+
+Compute (FLOPs)     Full (standard) attention         FlashAttention
+HBM accesses (I/O)  (N²d)
+Extra memory        (N·d + N²)                        (N²d) -- same, + recompute in backward
+Measured speed      O(N²) -- materializes N×N scores
+                    1× (PyTorch baseline)             (N²d² / M)  up to 9× fewer for GPT-2 (M = SRAM size)
+                                                      O(N) -- never forms the N×N matrix  softmax (
+                                                      )
+                                                      7.6× attention op (GPT-2); 3× GPT-2 training; +15% over BERT MLPerf record
+
+tiling + recomputation give exact attention with significantly less HBM traffic.
+
+[1] Dao et al., FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness, NeurIPS 2022. [2] Dao, FlashAttention-2, ICLR 2024. [3] Shah et al., FlashAttention-3, NeurIPS 2024.
+FlashAttention: IO-Aware Exact Attention
+
+1. Tile, merge, discard                 2. Online softmax via log-sum-exp
+
+one score tile lives in SRAM at a time  merge one K / V tile into each query row
+
+  Q            K , V
+
+query block    current tile
+
+             
+
+        S = Q K                           Final tile: LSE = m + log 
+
+         tile stats: m, , P 
+
+  merge into running state
+
+         state update
+(m, , O)  (m ,  , O
+
+               )
+
+                                        Exact result · O(N) auxiliary memory · no N×N score matrix in HBM
+Ring Attention
+
+                · Each host holds one query block
+
+                · The communication is overlapped
+                   with the computation.
+Background -- Linear Attention
+
+Background: Linear Complexity Attention
+
+Approximate the  using Gaussian RBF kernel
+
+Approximate the attention as
+
+The complexity is reduced into linear.
+Limitation: the intensive floating-point multiplications still consume a large amount of energy.
+Linear Attention               Linear Attention  Variants of Linear Attention   Linear attention prefix caching 
+                                                                                agentic 
+    Recall: Softmax Attention                    Gated Linear Attention (GLA)
+                                                 Add gate decay for forgetting
+Linear Compute Complexity
+· Reorder matrix multiplication to reduce        Delta Net
+                                                 Learn what to write
+    attention complexity to O(N).
+· Replace explicit pairwise attention with a     Gated Delta Net (GDN)
+                                                 Learn forgetting & writing
+    compressed recurrent state.                  KDA, EDA, ...
+
+                                                 Hybrid Architecture
+
+Causal Mask + Linear Attention -> RNNs           Qwen 3 Next
+· Compress the entire history into a
+
+    constant-size recurrent state.
+
+                                                                                Kimi Linear
+Linear Attention: FlashQLA
+
+· Gate-aware Auto Context Parallelism                    · Forward: 2­3× Speedup
+                                                         · Backward: 2× Speedup
+       · Scalable to TP & long sequences
+       · Automatic workload-aware CP Partitioning
+       · Gate-induced error decay
+
+· Hardware-friendly GDN Reformulation
+
+       · Factor gate decay out
+       · Lower Tensor Core / CUDA Core / SFU cost
+
+· Warp-specialized Fused TileLang Kernels
+
+       · Manual warpgroup specialization
+       · Overlap data transfer, Tensor Core & CUDA Core
+
+    https://github.com/QwenLM/FlashQLA
+    https://qwen.ai/blog?id=flashqla
+Sparse Attention                              Static Sparse Attention
+                                              · Fixed patterns
+     Attention Maps Are Inherently Sparse     · StreamingLLM, MInference, ...
+     Only a small fraction of tokens receive
+     most of the attention.
+
+                                              Dynamic Block Sparse Attention
+                                              · Adaptive block selection
+                                              · SpargeAttn, XAttention, ...
+
+                                              Dynamic Token Sparse Attention
+                                              · Fine-grained token selection
+                                              · DeepSeek Sparse Attention, ...
+A 1M-Token GLM-5.2 Agent Holds 90.5 GiB of Cache
+
+GLM-5.2 is a 744B-class MoE (~40B active), built for long-horizon coding and  GLM-5.2 @ 1M · vLLM cache layout
+research agents with a 1,048,576-token context window.
+                                                                              90.46 KiB/token × 1,048,576 tokens
+Its MLA + DSA stack compresses retained attention state, but long histories
+and concurrent agents still multiply memory.                                   90.5 GiB -- for ONE agent
+
+                                                                              4 independent histories   362 GiB, before weights and
+                                                                              runtime buffers
+
+Why long-horizon agents stress both phases                  Decode
+
+   Prefill
+
+prompt tokens t ... t                                       existing K/V cache (6 entries)  +1 new
+
+                           one parallel forward pass                           attend over all 7, append 1 entry
+
+    K/V cache -- 6 entries built at once                        K/V cache -- now 7 entries, repeat ×1/step
+
+All N prompt tokens attend to each other in a single pass.  Every step re-reads the whole cache, appends one new K/V pair.
+Compute-bound -- high GPU utilization.                      Memory-bandwidth-bound -- cache grows every step.
+
+Even compressed, GLM-5.2 holds 90.5 GiB at 1M tokens; memory scales with context × active agents.
+
+[1] vLLM GLM-5.2 layout: 78×(512 MLA latent + 64 RoPE) BF16 + 21 DSA index caches (128 FP8 + scale) = 90.46 KiB/token. At 2^20 tokens: 90.46 GiB; excludes weights/runtime.
+KV Cache Compression: A Taxonomy
+
+Fixed-Rule (Static)                                                 Attention-Score-Based (Dynamic)
+
+· A predetermined keep/evict rule -- no runtime attention           · Rank cached tokens by (historical) attention score; evict/unread
+observation.                                                        the lowest scorers.
+· StreamingLLM: keep the first "sink" tokens + a sliding window of
+recent tokens; evict everything between.                            · H2O keeps a running cumulative score per step; ZipCache
+                                                                    dynamically ranks tokens with normalized cumulative attention
+prompt                                                              scores and probe tokens.
+
+                                                                    · ~20% of tokens receive ~80% of total attention weight --
+                                                                    attention is highly non-uniform.
+
+sinks  evicted (dropped)  sliding window (kept)
+
+e.g. StreamingLLM (Xiao et al., ICLR 2024)
+
+Linear attention: KV cache states                                   tall bar = high attention score  kept (blue); low score  evicted (gray)
+keep the constant size
+                                                                    e.g. H2O (NeurIPS 2023), ZipCache (NeurIPS 2024)
+
+                                                                    Both hit the same infra wall: FlashAttention hides
+                                                                    scores, PagedAttention fragments memory.
+Our KV Cache Compression Methods
+
+ZipCache                                                MiniCache                                                 TriAttention
+
+NeurIPS 2024                                            NeurIPS 2024                                              ICML 2026 · w/ MIT, NVIDIA
+
+· Score cached tokens by normalized attention           · Adjacent middle-to-deep layers hold near-identical      · Q/K vectors concentrate in pre-RoPE space 
+weight to estimate saliency. Compatible with            KV states                                                 attention predicted from geometry, no observed
+FlashAttention.                                                                                                   scores needed
+                                                        · Merge across depth: interpolate direction,
+· Salient tokens quantized at 4-bit, the rest at 2-     preserve magnitude; keep outlier tokens unmerged          · Compatible with FlashAttention; compacts freed
+bit -- mixed precision                                                                                            blocks under PagedAttention
+                                                        · Up to 41% memory reduction, ~5× throughput vs.
+· 4.98× compression on Mistral-7B/GSM8K, only           FP16                                                      · 2.5× throughput, 10.7× KV memory reduction at
+0.38% accuracy drop                                                                                               matched accuracy
+                                                               MiniCache
+
+Accuracy vs. latency vs. prior KV quantization methods  Cross-layer merging vs. prior (single-layer) compression  Offline calibration  trigonometric score  pruned attention map
+
+[1] He et al., ZipCache: Accurate and Efficient KV Cache Quantization with Salient Token Identification, NeurIPS 2024.
+[2] Liu et al., MiniCache: KV Cache Compression in Depth Dimension for LLMs, NeurIPS 2024. [3] Mao et al., TriAttention: Efficient Long Reasoning with Trigonometric KV Compression, arXiv 2026.
+Demo: TriAttention Running Inside OpenClaw
+
+                              Task: read six project files and write a weekly report -- Qwen3-32B-INT4 (AWQ) on a single RTX 4090 (24GB).
+                    Without TriAttention: KV cache exhausted mid-task  OOM. With TriAttention: completes within the memory budget.
+Hierarchical KV Cache Systems                                                    Why tiered caching?
+
+                                                    hot · fast · small capacity  · GPU HBM is fast but small -- long-context KV cache quickly
+                                                                                 outgrows it
+      GPU HBM                                                                    · Systems (e.g. NVIDIA Dynamo) offload cold KV blocks HBM
+                                                                                  DRAM  SSD  remote as context grows
+         capacity: 10s of GB · bandwidth: ~TB/s                                  · Latency vs. capacity trade-off: moving 50GB of KV costs
+         hottest -- active generation                                            ~15ms from HBM but ~800ms from CPU DRAM
+
+      CPU DRAM                                                                   In agent scenarios
+
+         capacity: 100s of GB­TB · PCIe ~64 GB/s (~2% of HBM)                       Hot memory
+         warm -- recently evicted
+                                                                                    the active session's recent turns / tool outputs -- kept
+      Local SSD / NVMe                                                              resident for instant reuse.
+
+         capacity: 10s of TB · bandwidth: a few GB/s                                Cold memory
+         cold -- overflow beyond DRAM
+                                                                                    older turns and long-term facts -- pushed to SSD / remote,
+      Remote / Distributed Storage                                                  fetched back only when relevant.
+
+         capacity: ~unlimited, scales out · network-limited RDMA
+         shared across instances / sessions
+
+                                                   cold · slow · huge capacity
+
+Like OS memory hierarchies: serving systems keep 'hot' KV close, push 'cold' KV to cheaper tiers.
+
+[1] NVIDIA, Dynamo -- low-latency distributed KV cache offload engine, 2026. [2] MinIO, KV Cache Offload as a Memory-Hierarchy Problem, 2026.
+Case Study: Hy-Memory (Tencent Hunyuan)
+
+                                                               Long-term agent memory system for the OpenClaw agent framework
+
+   The problem
+
+    Agents degrade over long use -- the "three-week trajectory": week 1
+    enthusiasm  week 2 frustration as context is forgotten  week 3
+    downgraded to simple queries.
+
+   Architecture
+
+    · System1 (real-time) handles L1­L4; System2 (async, seconds­minutes)
+    distills L5­L6 without blocking dialogue
+
+- Achieves an 85.2 score on LongMemEval benchmark
+- Uses 35% fewer tokens when handling long context inputs
+- Delivers 3 4× higher memory density compared with peer methods
+- Enables 8 times faster write operations than Graphiti
+
+                                                                  Same idea as the systems hierarchy: keep
+                                                                  hot context fast in the foreground, distill
+                                                                  cold memory in the background.
+
+                                                                  [1] Tencent Hunyuan, Hy-Memory
+KV Cache  Attention :  MHAMQAGQA  MLA
+
+KV Cache  context ,MQA / GQA  head  K, V ;MLA  K, V  head
+ c_t, c_t( MQA)
+
+K / V                   MHA                     MQA                           GQA                               MLA
+
+         head  K, V              h  head  1  K, V         h/g  head , g  K, V(1<g<h)   K, V  c_t,
+                                2·d_k, MHA  1/h                                        head
+                                ,
+ token· 2·h·d_k()               PaLM, StarCoder, Gemini  2·g·d_k, MHA  g/h             d_c + d_r = 512 + 64, h 
+
+        ,                                                ;70B  g=8  8                    MQA,  MHA;RoPE  d_r 
+                                                                                       
+
+        Transformer, LLaMA2-7B                           LLaMA2/3-70B, Yi, ChatGLM2/3  DeepSeek-V3
+
+KV Cache    context batch; MLA  +  +  RoPE
+
+MQA MHA 
+
+[1] Ainslie et al., GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints, EMNLP 2023. [2] , :MHAMQAGQAMLA,
+spaces.ac.cn/archives/10091, 2024. [3] DeepSeek-AI, DeepSeek-V2, 2024.
+DeepSeek-V4 CSA
+WorldAttention ­ Efficient Attention for World Models
+
+                                                                                                                                                                            Current Challenges:
+                                                                                                                                                                            · Interaction versus memory efficiency:
+
+                                                                                                                                                                                 sliding-window KV cache forgets earlier
+                                                                                                                                                                                 context, while full-history KV cache rapidly
+                                                                                                                                                                                 exceeds GPU memory capacity.
+
+                                                                                                                                                                            · Efficient attention computation: retrieved
+                                                                                                                                                                                 KV cache contain many redundant tokens
+                                                                                                                                                                                 and fragmented memory access patterns,
+                                                                                                                                                                                 causing large decoding overhead and low
+                                                                                                                                                                                 hardware efficiency.
+
+   Overall architecture of WorldAttention: We propose a system-oriented co-design using Hierarchical KV
+   Cache (HKV) for coarse-to-fine paged memory retrieval, and Hybrid Sparse Attention (HSA) for efficient dual-
+   branch attention computation.
+WorldAttention ­ Efficient Attention for World Models
+
+   Compared with existing approaches of interactive video generation, WorldAttention maintains stronger subject
+   consistency, smoother motion transitions, and more stable scene structure across the entire sequence
+Inference: Efficient Decoding
+Speculative Decoding
+
+                                                                                                                                                              Input: prefix x, draft model q, target model p, lookahead K
+                                                                                                                                                              while not EOS:
+
+                                                                                                                                                                 # 1. Draft K tokens sequentially
+                                                                                                                                                                 y1...yK ~ q(. | x)
+                                                                                                                                                                 # 2. Target scores all drafted positions in parallel
+                                                                                                                                                                 compute p(. | x, y<1), ..., p(. | x, y<K)
+                                                                                                                                                                 # 3. Accept / reject
+                                                                                                                                                                 for i = 1 ... K:
+
+                                                                                                                                                                     = min(1, p(yi) / q(yi))
+                                                                                                                                                                    if Uniform(0,1)  :
+
+                                                                                                                                                                       append yi to x
+                                                                                                                                                                    else:
+
+                                                                                                                                                                       sample z ~ normalize(max(p - q, 0))
+                                                                                                                                                                       append z to x
+                                                                                                                                                                       break
+                                                                                                                                                                 # 4. If all K tokens accepted, sample one extra target token
+                                                                                                                                                                 if all accepted:
+                                                                                                                                                                    sample z ~ p(. | x, y1...yK)
+                                                                                                                                                                    append z to x
+
+Motivation: a target model can score all positions of the drafted sequence in parallel (prefilling), although the draft itself
+may be sequential (decoding). Correct acceptance and recovery preserve the target model's output distribution.
+
+Limitation:
+
+· Autoregressive decoding emits one token per step; decode is often memory-bandwidth bound.
+
+· The target model requires a separate LLM.
+Multiple-Token Prediction (MTP)
+
+                                 · Predict several candidate tokens in parallel,
+                                     then verify them with the target model.
+
+                                 · Medusa/EAGLE family adds parallel decoding
+                                 heads; top-k outputs form tree-structured candidate
+                                 continuations.
+
+                                 · EAGLE-3 fuses multi-layer target features and
+                                 predicts draft tokens directly.
+
+                                 · The target model verifies many candidate
+                                 positions in one batched forward pass.
+
+                                 · More candidates can increase accepted tokens--but
+                                 also add verification work (computation-bound).
+
+              Multiple heads  tree candidates  target verification
+
+Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads -- https://arxiv.org/pdf/2401.10774
+EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test -- https://arxiv.org/pdf/2503.01840
+Diffusion-LLM based MTP
+Diffusion-LLM based MTP (Drafter)                             DSpark -- dependency-aware drafting + scheduled verify
+                                                              Parallel backbone  sequential block  confidence prefix  verify
+    DFlash -- block-diffusion parallel drafting               (Source: DSpark)
+    Target features  masked block  one-pass proposal  verify
+    (Source: DFlash)
+
+DFlash minimizes draft latency; DSpark reduces wasted verification.
+Trade-off: proposal quality and accepted length versus drafting latency, verification overhead, and serving complexity.
+Measured Impact: Faster Drafting, More Efficient Verification
+
+   DFlash: 2.75­6.08× across tasks; DSpark: +60­85% per-user speed at matched throughput.
+
+   Source: Cheng et al. (2026)
+Diffusion-LLM based MTP
+
+   DSpark addresses a key bottleneck under load: instead of verifying every draft token, it verifies only where the draft
+   model is confident, so the gains hold even as batch size scales.
+
+    [1] DSpark in SGLang: Speculative Decoding with Confidence-Driven, Variable-Length Verification -- https://www.lmsys.org/blog/2026-07-06-dspark-sglang
+K-Forcing ­ Next-K-Token Decoding for Language Models
+
+   Observation: (b) AR leads to memory-bound decoding. (c) Speculative decoding yields a variable number of
+   accepted tokens that breaks regular batching. (d) MDLM predicts masked positions in parallel from per-position
+   marginals, rather than their joint distribution.
+   Solution: (a) K-Forcing uses a push-forward language model to map i.i.d. uniform noise tokens to a fixed-length
+   block of future tokens, modeling their joint distribution.
+Infrastructure and Inference Frameworks
+
+Framework      Primary Focus             Key Techniques                               Best Fit
+SGLang         Production serving                                                     Low-latency / high-throughput APIs and clusters
+                                         RadixAttention; prefix cache; structured
+                                         outputs; spec decode
+
+vLLM           General-purpose serving   PagedAttention; continuous batching; prefix  Broad model and hardware ecosystem
+                                         cache; speculative decoding
+
+FlashInfer     GPU kernel library        Attention, paged KV, GEMM, quantized and     Custom serving stacks and kernel backends
+                                         MoE kernels
+
+KTransformers  CPU­GPU hybrid MoE        CPU expert kernels; offload/scheduling;      Large sparse models with limited GPU memory
+                                         quantization
+
+TensorRT-LLM   NVIDIA inference runtime  In-flight batching; paged KV; quantization;  NVIDIA-optimized production deployment
+                                         multi-GPU; spec decode
+
+Choose by model structure, hardware, concurrency, latency target, and workload--not by a universal "fastest" label.
+Infrastructure and Inference Frameworks
+
+                   Motivation:
+
+                   1. The property of different inference phases ( Prefill vs Decode) and
+
+                   different model modules (Attention vs FFN) is greatly different.
+
+                   Prefill: Compute-bound           Decode: Memory-bound
+
+                   Attention: Massive memory access FFN: Pure computation
+
+                   1. The property of different GPUs is greatly different.
+
+PD Disaggregation  H20: Bandwidth-rich but compute-poor                     Memory-bound
+AF Disaggregation
+                   H100: Better compute but poorer bandwidth Compute-bound
+
+                   Method:
+
+                   In a word, separate different inference phases / model modules in different
+
+                   GPU instance
+
+                                 Prefill vs Decode  PD Disaggregation
+
+                                 Attention vs FFN   AF Disaggregation
+Inference Acceleration in Multimodal Understanding and Generation
+
+Understanding                                                  Generation
+
+     · AR decoder-based generation                                  · Diffusion-based iterative sampling
+     · Bottleneck: prefill attention + decoding memory access       · Bottleneck: repeated large-scale computation
+
+· Sparse Attention: ZipVL ICCV 2025                            · Reduce Denoising Steps
+                                                                   Examples: VideoLCM, T2V-Turbo, DOLLAR
+         · Efficient Approximation of KV Importance
+         · Prefilling: Skip computations for unimportant ones  · Reuse Computation Across Denoising Steps
+         · Decoding: Unimportant KV tokens will not be loaded      Examples: TeaCache, FasterCache
+
+                                                               · Sparse/Linear Attention
+                                                                   Examples: SVG, BLADE ICLR 2026, PSA CVPR 2026
+VideoGen Infra ­ DAX
+
+DAX (Diffusion Accelerated eXecution): High performance inference engine for diffusion models (5s base)
+   Wall time for generating one video with Wan2.1 T2V 14B, 720p, 5s, 50steps, on Nvidia H20, with DAX
+
+  · Quantization: FP8/INT8 GEMM and SageAttention2 for attention.
+  · Sequence parallelism with carefully tuned communication overlap.
+  · Teacache, accelerating DiT model inference by skipping trivial denoising steps.
+  · Torch.compile: fusing quantization and communication ops.
+https://github.com/RiseAI-Sys/DAX
+VideoGen Infra ­ SGLang Diffusion
+
+ SGLang-Diffusion: High-performance inference and serving framework for image and video generation.
+
+  · Attention backends: FlashAttention, SageAttention and multiple sparse-attention implementations.
+  · Quantization & caching: FP8/NVFP4/INT4 quantization, with Cache-DiT and TeaCache.
+  · Parallel serving: Ulysses/Ring sequence parallelism, TP/FSDP/CFG parallelism.
+SGLang Diffusion
+VideoGen Infra ­ Turbo Diffusion
+
+TurboDiffusion: Model-system co-designed acceleration framework for video diffusion models (100­200× speedup).
+
+· W8A8 quantization: quantizing both weights and activations to accelerate linear layers and reduce memory.
+· rCM step distillation: reducing diffusion sampling to only 1­4 denoising steps.
+· SageSLA: combining low-bit SageAttention with trainable Sparse-Linear Attention.
+· Kernel optimization: fused normalization and quantized GEMM kernels.
+https://github.com/thu-ml/TurboDiffusion
+Block Diffusion (Autoregressive Diffusion, Semi-AR)
+
+: Block Diffusion
+
+            Figure from BD-3 [1]
+
+     Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models, ICLR 2025
+Block Diffusion for Video Generation
+Inferix: An Inference Engine for World Simulation
+
+ Advanced KV Cache Management                                                      Quantized Inference
+
+   Intelligent memory management for persistent world simulation                     8-bit (INT8 / FP8) quantization, per-tensor or per-token-per-channel, with
+                                                                                     DAX support
+ Distributed World Synthesis
+                                                                                   Built-in Profiling
+   Large-scale immersive environment generation across devices
+                                                                                     Performance monitoring with enhanced diffusion-model profiling
+ Interactive Generation
+                                                                                   Seamless Model Integration
+   Real-time preview with Gradio UI; pause / resume / stop and on-the-fly prompt
+   changes -- runs on 16 GB consumer GPUs                                            Simple API for deploying new world models
+
+ Continuous Prompt Support                                                         Next-Gen Architecture
+
+   Dynamic narrative control: different prompts for different video segments         Purpose-built for immersive world synthesis at scale
+
+ Video Streaming
+
+   Stream generated content live via RTMP and WebRTC
+
+Takeaway: Inferix serves block-diffusion world models interactively, in real time -- even on consumer GPUs.
+Part 4 ­ Agent Loops
+The Progress of AI Coding: Towards Software AGI
+
+   2020­22 Autocomplete (ghost text)  2023 RAG context  2024 Agentic shift (tools that act)  2025 Reasoning, multi-step
+   agents  2026 Autonomous operations
+   · From ticket to merged PR: parallel agents assign, delegate, and verify tasks as a team
+   · In 2026, we are at the dawn of Software AGI
+
+   AI coding compounds like the lily pond -- if your workflow is still in the 2022­24 era, upgrade it now.
+
+      [1] Ligeng Zhu, Advancing Vibe Coding with Agent Loops, NVIDIA Research.
+What is an Agent Loop?
+
+     · Definition: an agent loop is a program that repeatedly lets a model plan, act with tools, observe the results,
+        and verify progress -- until the goal is met or a stop condition fires.
+
+ Goal + state           Plan                Act            Observe             Verify
+
+objective, budget  next useful step  tools, code, shell  outputs, errors  tests, acceptance
+
+                                                                                   failed / incomplete  back to Plan
+
+· Durable state (files, memory, experiment records, checkpoints) lets iterations compound beyond one context window.
+
+The human role shifts to defining goals, permissions, budgets, and stop conditions.
+Agent Loops for Research: Karpathy's AutoResearch
+
+program.md -- the whole harness is one natural-language prompt  · An LLM as an overnight research intern: hack
+                                                                train.py with an experimental idea  run  read
+                                                                val_bpb
+
+                                                                · Verifiable metric as the reward: keep the commit if
+                                                                the loss improves, otherwise git reset -- every idea
+                                                                judged by the same number
+
+                                                                · "NEVER STOP": no pausing to ask the human; out of
+                                                                ideas  read the papers, combine near-misses, try
+                                                                more radical changes
+
+                                                                · Runs 7×24 on a GPU node until manually
+                                                                interrupted -- vibe research, beyond vibe coding
+
+A one-page natural-language loop turns an agent into a 7×24 self-driven experimenter.
+
+[1] A. Karpathy, AutoResearch, https://github.com/karpathy/autoresearch 2026.
+Learning without Gradients/Heuristic Learning/Continuous Learning
+
+· Heuristic Learning (HL)/Continuous Learning: a coding agent improves a programmatic policy from feedback -- no
+   gradient updates, the "weights" are code.
+
+            Deep RL vs. Heuristic Learning
+
+Axis        HL
+
+Policy      MPC
+
+State       ----
+
+Action      
+
+Feedback    
+
+Update      
+
+Memory      
+
+Core shift: learning becomes maintaining a software system with explicit update paths.
+
+[1] Jiayi Weng, Learning Beyond Gradients, blog, May 2026.
+Continual Learning Becomes Software Maintenance
+
+· A healthy Heuristic System balances three duties:
+    ­ Absorb feedback -- failures, logs, rewards, human corrections
+    ­ Preserve capabilities -- regression tests, fixed-seed replays, golden traces
+    ­ Compress history -- refactor local patches into simpler code
+
+· Advantages over Deep RL:                              Overfitting control -- multi-seed evaluation
+
+   Explainability -- readable program logic
+
+Sample efficiency -- large gains from one code update Reduced forgetting -- capabilities persist in rules and tests
+
+Regression-testability -- tests, replays, golden cases
+
+· Bi-level Optimization: HL = System 1 (real-time control) + LLM agent = System 2 (improves the system, distills data for
+   weight updates)
+
+Forgetting becomes an engineering problem: tests + replays + refactoring, not parameter tricks.
+
+[1] Jiayi Weng, Learning Beyond Gradients, blog, May 2026.
+Self-improving Harness: Optimize the Code that Executes Agents
+
+                                                                          · Self-Harness: a propose­evaluate­accept loop
+
+                                                                               ­ Weakness mining -- cluster failures into
+                                                                                   verifier-grounded root-cause patterns
+
+                                                                               ­ Harness proposal -- bounded edits on editable
+                                                                                   surfaces; target recurrent, addressable patterns
+
+                                                                               ­ Validation -- accept only edits with no
+                                                                                   regression on held-in + held-out splits
+
+                                                                          · Findings & cautions:
+
+                                                                               ­ Boundaries -- permissions & security must live
+                                                                                   outside the loop; reward hacking remains
+
+The harness itself becomes a learned artifact
+
+[1] Zhang et al., Self-Harness: Harnesses That Improve Themselves, 2026.
+Example: Agent-as-A-Router
+
+                                                                                                            Agent-as-a-Router: Agentic Model Routing for
+                                                                                                            Coding Tasks, arxiv 2026
+Example: Agent-as-A-Router
+
+   3000agentic router
+   opusopus
+Agent Loops for Kernel, Infra and Hardware Optimization
+
+Kernel Agents: From One-Shot Generation to Measured Search
+
+· One-shot LLMs beat PyTorch eager on < 20% of KernelBench     KernelPro geomean speedup vs. KernelBlaster
+   (250 tasks) -- the wins come from the loop.
+                                                                                                                                                                     5.30x
+· The loop: correctness gate  benchmark  NCU profile 
+   targeted next edit                                                                                                                            4.69x
+
+    ­ KernelFalcon (PyTorch) -- 100% correctness on all 250    2.42x
+        KernelBench tasks
+
+    ­ KernelPro -- 5.30x geomean on Level 3; -11.6% energy at
+        matched speed
+
+    ­ KernelEvolve (Meta, ISCA 2026) -- +60% inference
+        throughput in production
+
+Profiler evidence  bottleneck diagnosis  next edit:                    Level 1                                                                              Level 2  Level 3
+kernel optimization becomes measured search.
+                                                               single                                                                            fused/composed      full model
+                                                               operators                                                                         operators           architectures
+
+[1] KernelBench, Ouyang et al. 2025. [2] KernelPro, arXiv:2606.26453. [3] KernelEvolve, arXiv:2512.23236 (ISCA 2026). [4] PyTorch KernelFalcon.
+Example: KernelPro
+KDA -- Top-3 in Every MLSys'26 FlashInfer Track
+
+          Humanize loop                                        KernelWiki                           ncu-report-skill
+
+task control: plan, execute, verify, review  knowledge: PRs from SGLang / vLLM / TRT-LLM /  evidence: stalls, throughput, timelines
+
+                                                                      DeepGEMM
+
+                                                                                            Over 200+ teams:
+
+                                                                                            #1 MoE track -- Full-Agent
+
+                                                                                            #2 DSA track -- Full-Agent
+
+                                                                                                                                          #3 GDN track -- Full-Agent
+
+                                                                                                                                             · DSA indexer: 1.37×  19.08×
+                                                                                                                                             · DSA attention: 6.15×  15.22×
+                                                                                                                                             · FP8 MoE: 0.27×  1.31× (post-contest, vs
+                                                                                                                                             closed-source TRT-LLM baseline)
+                                                                                                                                             · Not magic everywhere: GDN decode
+                                                                                                                                             0.92× -- verifier-grounded honesty
+
+· No single trick -- structure, knowledge, and profiler evidence compound to 6.26×.
+· Implement: CC, Review: Codex
+
+[1] L. Zhu, Advancing Token Productivity with Agent Loops, NVIDIA Research, 2026. [2] Ligeng Zhu et al., KDA: Kernel Develop Agents for Blackwell, NVIDIA Research, 2026 (figure adapted). [3]
+github.com/mit-han-lab/kernel-design-agents.
+Part 5 ­ Future Work
+Evolution of Multimodal Foundation Models
+
+             VLM: understanding                       Image/video generation                            Unified understanding + generation
+
+                    e.g., LLaVA, Qwen-VL              e.g., Wan 2.x, HunyuanVideo                                      e.g., Show-o, Janus-Pro
+
+                     Image + Text prompt                Text / image (+ camera, controls)                                         Text / Image
+
+                  Vision encoder  projector                   Diffusion transformer (DiT)                                       One transformer:
+                                                                video foundation model                             AR text + (discrete) diffusion images
+                                 LLM
+                                                             Video: a rollout of the world                                     Text / Image out
+                            Text answer
+                                                      Open video models (Wan 2.7 leads Wan-Bench 2.0;   One model both understands and generates; Janus-
+Bolt a vision encoder onto an LLM via visual          HunyuanVideo-1.5 runs on one 4090) -- generation  Pro decouples visual encoding for the two roles.
+instruction tuning -- perception & reasoning, output  becomes simulation: predicting how the world
+is text only.                                         evolves.
+
+From perceiving images, to generating them, to simulating how the world evolves.
+
+[1] Liu et al., LLaVA, NeurIPS 2023. [2] Xie et al., Show-o, ICLR 2025. [3] Chen et al., Janus-Pro, 2025. [4] Wan et al., Wan 2.x, 2025­26. [5] Tencent, HunyuanVideo 1.5, 2025.
+Adding Action: VLA  World Action Model  Unified Action
+
+VLA: vision­language­action                       World action model                                    Unified action model
+
+           e.g., -0.5, Qwen-VLA                        e.g., LingBot-VA                                     e.g., Cosmos-3, -0.7
+
+ Observations + instruction                       Interleaved sequence: v a v                               Text / image / video / audio
+         VLM backbone                                                a ...
+                                                                                                           One omnimodal transformer
+Action expert (flow / diffusion)                   Causal video­action world model                      (reasoning + generation + action)
+          Robot actions
+                                                        Next world state + action                             Video + actions + text
+
+-0.5: open-world generalization in unseen homes;  "Think before acting": imagine the next frames, then  Cosmos-3: two-tower MoT omni-model subsuming
+Qwen-VLA: one unified action space controls many  act. 98.5% on LIBERO-Long; adapts to new tasks        VLMs, video generators, simulators & policies; -
+robot bodies (38k hrs of data).                   with 30­50 demos.                                     0.7: steerable generalist with emergent skill
+                                                                                                        composition.
+
+[1] Physical Intelligence, -0.5 (2025) & -0.7 (2026). [2] Qwen Team, Qwen-VLA, 2026. [3] NVIDIA, Cosmos-3: Omnimodal World Models for Physical AI, 2026. [4] Ant Lingbo, LingBot-VA, RSS 2026.
+
+Action closes the loop: from predicting the world to acting in it with one model.
+Future Work ­ 4D World Model
+
+World model properties:
+
+Real-time, interactive, physically plausible, geometry consistent, long, high-fidelity...
+
+ Why we need 4D world model?
+
+     · Simulator for agentic AI, embodied AI, and gaming.
+     · Scaling up World Model -- emerging understanding (perception and reasoning) capabilities.
+
+              LLM-centric era will be gone! Vision-centric will be the future!
+Agentic World Model: What We Are Targeting
+
+                     Agentic scene synthesis                                 · Embodied data is the bottleneck: real-robot
+                                                                             collection is slow, sim scenes are hand-built
+                       agents compose 3D scenes,                             · Our approach: agents synthesize simulation-ready
+                                                                             scenes & tasks; environment feedback filters and
+                             assets & task specs                             improves them
+                                                                             · Every loop iteration improves both the data and
+Model iteration          DATA                       Simulation rollouts      the model
+                     FLYWHEEL
+retrain world model                                   embodied trajectories          ~100× cheaper
+
+       & policy                                                at scale               our synthesized scenes cost two orders of
+                                                                                  magnitude less than commercial scene pipelines
+
+                     Environment feedback
+
+                        success / failure signals,
+
+                             physics violations
+
+An agentic world model turns simulation into a self-improving data flywheel -- at 1% of the commercial cost.
+Agentic World Model: A Simple Demo
+Some Real Industry-level Infra Issues ­ Training
+
+      · 
+      ·  Attention B- MFU
+      ·  Mask  Flash Attention  B 
+
+           
+      · Data/Training Server  LoRA 
+      
+Some Real Industry-level Infra Issues ­ Inference
+
+      ·  KV Cache  HBM-SSD-cache 90% 
+           
+
+      · 
+      · 
+      ·  PD  Blackwell 
+
+           -
+      
+AI Chip for Agent
+
+                    AI 
+
+                   · 
+                   · AI 
+                   · Kernel
+                   · 
+
+                    e.g., 3D etc...
+To Students
+
+                            Stay Positive, Keep Healthy!
+
+                                                                       Agent-native workflow
+
+                                                                   decides how fast ideas become reality
+
+                             Research taste & insight
+
+                            decide the quality and impact of your
+
+                                                 work
+
+Vision & perspective
+
+ decide how far you can go
+
+Think big, stay curious, be agent-native -- and take care of yourself along the way.
+

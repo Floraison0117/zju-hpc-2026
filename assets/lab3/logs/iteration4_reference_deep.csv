@@ -1,0 +1,10 @@
+case,scope,implementation,correctness,median_ms,reference_over_student
+2026-07-24 09:03:32  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_raw_qk` with `out_idx=None`
+2026-07-24 09:03:36  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_raw_qk`
+2026-07-24 09:03:37  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_persistent_tensorcore` with `out_idx=None`
+2026-07-24 09:03:45  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_persistent_tensorcore`
+deep_gva_state,student_core,student,PASS,20.228815,
+deep_gva_state,full_forward,student,PASS,21.547696,
+deep_gva_state,full_forward,flash_qla,PASS,3.634752,0.168684
+deep_gva_state,full_forward,fla,PASS,12.846720,0.596199
+deep_gva_state,full_forward,flashinfer,PASS,2.671376,0.123975

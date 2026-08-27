@@ -1,0 +1,12 @@
+Baseline: elapsed=85.4s tokens=320
+Assume prefill+overhead ~15.0s; decode target < 25s
+
+draft          K    M  steps  tok/step acc_rate  decode_s  total_s  <40s
+prompt-lookup   4   10    303      1.06   26.56%     292.1    307.1    no
+prompt-lookup   8   18    302      1.06   15.00%     290.5    305.5    no
+prompt-lookup  16   34    302      1.06    7.63%     290.5    305.5    no
+prompt-lookup  31   64    302      1.06    4.04%     284.8    299.8    no
+lookahead      4   10    227      1.41   80.17%     218.8    233.8    no
+lookahead      8   18    217      1.47   67.76%     208.8    223.8    no
+lookahead     16   34    209      1.53   68.10%     201.1    216.1    no
+lookahead     31   64    207      1.55   55.67%     195.2    210.2    no

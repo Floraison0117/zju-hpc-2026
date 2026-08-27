@@ -1,0 +1,29 @@
+case,scope,implementation,correctness,median_ms,reference_over_student
+2026-07-24 09:00:34  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_raw_qk` with `out_idx=None`
+2026-07-24 09:00:39  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_raw_qk`
+2026-07-24 09:00:40  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_persistent_tensorcore` with `out_idx=None`
+2026-07-24 09:00:49  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_persistent_tensorcore`
+short_tail_state,student_core,student,PASS,0.474384,
+long_low_gva,student_core,student,PASS,14.814032,
+batch_split_gva,student_core,student,PASS,10.002960,
+2026-07-24 09:00:52  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_raw_qk` with `out_idx=None`
+2026-07-24 09:00:57  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_raw_qk`
+2026-07-24 09:00:58  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_persistent_tensorcore` with `out_idx=None`
+2026-07-24 09:01:06  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_persistent_tensorcore`
+chain_equal,student_core,student,PASS,1.927360,
+short_tail_state,full_forward,student,PASS,0.501216,
+short_tail_state,full_forward,flash_qla,PASS,0.274816,0.548299
+short_tail_state,full_forward,fla,PASS,0.464768,0.927281
+short_tail_state,full_forward,flashinfer,PASS,0.303472,0.605471
+long_low_gva,full_forward,student,PASS,15.893568,
+long_low_gva,full_forward,flash_qla,PASS,1.829264,0.115095
+long_low_gva,full_forward,fla,PASS,6.433120,0.404762
+long_low_gva,full_forward,flashinfer,PASS,1.817120,0.114331
+batch_split_gva,full_forward,student,PASS,10.649760,
+batch_split_gva,full_forward,flash_qla,PASS,1.819440,0.170843
+batch_split_gva,full_forward,fla,PASS,6.146912,0.577188
+batch_split_gva,full_forward,flashinfer,PASS,1.439200,0.135139
+chain_equal,full_forward,student,PASS,2.043520,
+chain_equal,full_forward,flash_qla,PASS,0.455568,0.222933
+chain_equal,full_forward,fla,PASS,0.935824,0.457947
+chain_equal,full_forward,flashinfer,PASS,0.782224,0.382783

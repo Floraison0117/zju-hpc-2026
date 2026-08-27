@@ -1,0 +1,52 @@
+# scratch / working areas (not deliverables)
+tmp/
+.remote_work/
+.snapshots/
+__pycache__/
+*.pyc
+
+# environment / credentials
+.env
+
+# build artifacts
+*.o
+*.obj
+*.out
+*.exe
+!labs/*.pdf
+*.log
+
+# final-project bulky snapshots (keep local, do not commit)
+lab-final/trsm/checkpoints/
+lab-final/trsm/tmp_v16/
+lab-final/trsm/microbench/*.o
+lab-final/trsm/*.o
+
+# compiled binaries
+lab-final/trsm/trsm_test*
+lab-final/trsm/t18*
+lab-final/trsm/t17*
+lab-final/trsm/trsm_v*
+lab-final/trsm/dgemm_*
+lab-final/trsm/nb*
+lab-final/trsm/sme_*_bench
+lab-final/trsm/sme_*_test
+lab-final/trsm/sme_*probe*
+lab-final/trsm/stream_bench
+lab-final/trsm/shape_rate
+lab-final/trsm/priv_gemm
+lab-final/trsm/trsm_bench*
+
+# OS junk
+nul
+Thumbs.db
+.DS_Store
+
+# agent runtimes / sessions
+.pi/
+.agents/
+.codex-zjusct/
+.codex/
+
+# Typst build convenience symlink (root assets/ is the source of truth)
+labs/assets/

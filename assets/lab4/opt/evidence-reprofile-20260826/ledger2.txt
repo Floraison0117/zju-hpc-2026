@@ -1,0 +1,133 @@
+kernels=7176997 name_col=shortName
+
+=== ALL KERNELS (kernel-time 617.6s, span 641.9s, host-gap 24.3s = 3.8%) ===
+kernel                                           calls   total_s   avg_ms  share%  blocks/launch min/med/max
+rhs_kernel                                       38944    203.72    5.231   32.98               125/512/1120
+rhs_kernel_int                                   38944    190.54    4.893   30.85               125/512/1120
+prolong3_kernel                                1192683     52.10    0.044    8.44                   1/43/141
+global_interp_kernel                             34400     48.83    1.419    7.91                    1/1/144
+prolong3_kernel_int                            1192683     31.58    0.026    5.11                   1/43/141
+sommerfeld_rout_kernel                          902976     29.94    0.033    4.85               343/512/1120
+restrict3_kernel                                294975     24.58    0.083    3.98                    1/29/72
+rungekutta4_rout_kernel                         912576     19.76    0.022    3.20                125/422/945
+gpu_unpack_kernel                              1926204      5.00    0.003    0.81                   1/34/927
+enforce_ga_kernel                                38024      4.55    0.120    0.74                125/422/945
+average2_kernel                                  93528      2.26    0.024    0.37                275/535/945
+global_interp_amr_kernel                          6370      1.43    0.224    0.23                      1/1/2
+gpu_pack_kernel                                 438546      1.42    0.003    0.23                   1/13/927
+surf_Wave_kernel                                   800      1.14    1.419    0.18                144/144/144
+lowerboundset_kernel                             38024      0.32    0.009    0.05                125/422/945
+surf_MassPAng_kernel                               800      0.17    0.218    0.03                144/144/144
+sommerfeld_routbam_kernel                         9600      0.13    0.013    0.02                125/125/125
+l2normhelper_kernel                               6300      0.07    0.012    0.01                 75/196/560
+admmass_bssn_kernel                                800      0.03    0.031    0.00                   75/75/75
+getnp4_kernel                                      100      0.02    0.196    0.00                125/125/125
+scale_normals_kernel                              1600      0.01    0.009    0.00                144/144/144
+normalize_shellf_kernel                           8000      0.01    0.002    0.00                    1/1/144
+average_kernel                                     120      0.00    0.017    0.00                275/507/760
+
+=== SUBCATEGORIES (rhs/prolong interior vs boundary, KO fused in rhs) ===
+subcategory                 calls   total_s  share%
+rhs_boundary                38944    203.72   32.98
+rhs_interior                38944    190.54   30.85
+analysis                   144818     53.96    8.74
+prolong3_boundary         1192683     52.10    8.44
+prolong3_interior         1192683     31.58    5.11
+sommerfeld                 912576     30.07    4.87
+restrict3                  294975     24.58    3.98
+rk4                        912576     19.76    3.20
+ghost                     2364750      6.42    1.04
+enforce                     38024      4.55    0.74
+misc                        46024      0.34    0.05
+
+=== MODULE GROUPS (kernel-time share of 617.6s) ===
+module            calls   total_s  share%
+RHS               77888    394.27   63.84
+Prolong         2385366     83.68   13.55
+Analysis         144818     53.96    8.74
+Sommerfeld       912576     30.07    4.87
+Restrict         294975     24.58    3.98
+RK4              912576     19.76    3.20
+Ghost           2364750      6.42    1.04
+Enforce           38024      4.55    0.74
+Misc              46024      0.34    0.05
+
+=== EARLY (coarsest grids)  (window 214s wall; kernel 208.0s = 97% of window) ===
+subcategory                 calls  total_s  share%
+rhs_boundary                13251    68.81   33.08
+rhs_interior                13250    64.47   31.00
+prolong3_boundary          404211    17.54    8.43
+analysis                    47969    16.75    8.05
+prolong3_interior          404211    10.61    5.10
+sommerfeld                 310728    10.37    4.99
+restrict3                  110631     8.73    4.20
+rk4                        310728     6.78    3.26
+ghost                      862954     2.28    1.09
+enforce                     12948     1.55    0.75
+misc                        15407     0.12    0.06
+  four main kernels (blocks/launch in this window):
+    rhs_kernel                 calls=   13251 total=  68.81s blocks/launch min/med/max = 125/512/1120
+    rhs_kernel_int             calls=   13250 total=  64.47s blocks/launch min/med/max = 125/512/1120
+    prolong3_kernel            calls=  404211 total=  17.54s blocks/launch min/med/max = 1/43/141
+    prolong3_kernel_int        calls=  404211 total=  10.61s blocks/launch min/med/max = 1/43/141
+  top kernels:
+    rhs_kernel                                       13251    68.81s   33.1%
+    rhs_kernel_int                                   13250    64.47s   31.0%
+    prolong3_kernel                                 404211    17.54s    8.4%
+    global_interp_kernel                             10604    15.09s    7.3%
+    prolong3_kernel_int                             404211    10.61s    5.1%
+    sommerfeld_rout_kernel                          307752    10.33s    5.0%
+
+=== MID  (window 214s wall; kernel 207.7s = 97% of window) ===
+subcategory                 calls  total_s  share%
+rhs_boundary                13039    68.59   33.02
+rhs_interior                13039    64.09   30.86
+prolong3_boundary          416352    17.95    8.64
+analysis                    46465    16.92    8.14
+prolong3_interior          416352    10.87    5.23
+sommerfeld                 306072    10.25    4.93
+restrict3                  102768     8.68    4.18
+rk4                        306072     6.67    3.21
+ghost                      727736     2.04    0.98
+enforce                     12753     1.53    0.74
+misc                        15253     0.11    0.06
+  four main kernels (blocks/launch in this window):
+    rhs_kernel                 calls=   13039 total=  68.59s blocks/launch min/med/max = 125/512/1040
+    rhs_kernel_int             calls=   13039 total=  64.09s blocks/launch min/med/max = 125/512/1040
+    prolong3_kernel            calls=  416352 total=  17.95s blocks/launch min/med/max = 1/43/134
+    prolong3_kernel_int        calls=  416352 total=  10.87s blocks/launch min/med/max = 1/43/134
+  top kernels:
+    rhs_kernel                                       13039    68.59s   33.0%
+    rhs_kernel_int                                   13039    64.09s   30.9%
+    prolong3_kernel                                 416352    17.95s    8.6%
+    global_interp_kernel                             10724    15.24s    7.3%
+    prolong3_kernel_int                             416352    10.87s    5.2%
+    sommerfeld_rout_kernel                          303096    10.21s    4.9%
+
+=== LATE (finest grids)  (window 214s wall; kernel 201.9s = 94% of window) ===
+subcategory                 calls  total_s  share%
+rhs_boundary                12654    66.33   32.85
+rhs_interior                12655    61.99   30.70
+analysis                    50384    20.30   10.05
+prolong3_boundary          372120    16.61    8.23
+prolong3_interior          372120    10.11    5.01
+sommerfeld                 295776     9.45    4.68
+restrict3                   81576     7.17    3.55
+rk4                        295776     6.31    3.12
+ghost                      774060     2.11    1.04
+enforce                     12323     1.47    0.73
+misc                        15364     0.11    0.05
+  four main kernels (blocks/launch in this window):
+    rhs_kernel                 calls=   12654 total=  66.33s blocks/launch min/med/max = 125/512/1120
+    rhs_kernel_int             calls=   12655 total=  61.99s blocks/launch min/med/max = 125/512/1120
+    prolong3_kernel            calls=  372120 total=  16.61s blocks/launch min/med/max = 1/43/140
+    prolong3_kernel_int        calls=  372120 total=  10.11s blocks/launch min/med/max = 1/43/140
+  top kernels:
+    rhs_kernel                                       12654    66.33s   32.8%
+    rhs_kernel_int                                   12655    61.99s   30.7%
+    global_interp_kernel                             13072    18.50s    9.2%
+    prolong3_kernel                                 372120    16.61s    8.2%
+    prolong3_kernel_int                             372120    10.11s    5.0%
+    sommerfeld_rout_kernel                          292128     9.40s    4.7%
+
+=== DONE ===

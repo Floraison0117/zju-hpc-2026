@@ -1,0 +1,51 @@
+{
+  "tutorial": "hpc101/tutorials/typ/11-gpu-programming.typ",
+  "source": "hpc101/source/11-gpu-programming.pdf",
+  "visuals": [
+    {
+      "id": "gpu-decorative",
+      "kind": "ai-decorative",
+      "purpose": "为引言建立大规模并行的视觉氛围",
+      "file": "hpc101/tutorials/assets/11-gpu-programming/gpu-parallelism-decorative-v1.png",
+      "used_in_tutorial": true,
+      "technical_claims": false,
+      "min_width_px": 1500,
+      "generator": "built-in image_gen",
+      "prompt": "Use case: stylized-concept\nAsset type: Chinese HPC tutorial chapter-opening decorative illustration\nPrimary request: an abstract visual metaphor for massively parallel GPU work, shown as many small luminous tiles moving in coordinated waves toward a central field of computation\nScene/backdrop: clean deep navy technical atmosphere with subtle grid depth\nSubject: abstract light tiles and flowing paths only, no literal chip diagram\nStyle/medium: polished editorial 3D illustration, restrained and sophisticated\nComposition/framing: wide landscape, strong central rhythm, generous clean margins\nLighting/mood: cool cyan and warm amber accents, calm sense of scale and coordination\nConstraints: decorative only; no text, no letters, no numbers, no logos, no watermark, no recognizable GPU product, no circuit labels, no technical architecture claims\nAvoid: infographic layout, arrows with semantic meaning, branded hardware, dense clutter",
+      "status": "accepted"
+    },
+    {
+      "id": "gpu-execution-hierarchy",
+      "kind": "vector-redraw",
+      "purpose": "解释 Grid、Block、Warp、Thread 的层级与调度关系",
+      "implementation_file": "hpc101/tutorials/typ/11-gpu-programming-visuals.typ",
+      "function": "gpu-execution-hierarchy",
+      "source_reference": "PDF 第 4 页",
+      "source_assets": [
+        "hpc101/tutorials/assets/11-gpu-programming/source-page04-simt-04.png"
+      ],
+      "technical_claims": true,
+      "status": "accepted"
+    },
+    {
+      "id": "gpu-coalescing-bars",
+      "kind": "derived-chart",
+      "purpose": "比较连续访问与最坏跨步访问的有效带宽比例",
+      "implementation_file": "hpc101/tutorials/typ/11-gpu-programming-visuals.typ",
+      "function": "coalescing-bars",
+      "source_reference": "PDF 第 10 页，32 个 int 和 32B sector 示例；比例由 4/4 与 4/32 推导",
+      "technical_claims": true,
+      "status": "accepted"
+    },
+    {
+      "id": "gpu-memory-reference",
+      "kind": "source-reference",
+      "purpose": "人工核对 GPU 存储层次与 K 循环描述",
+      "file": "hpc101/tutorials/assets/11-gpu-programming/source-page17-memory-17.png",
+      "used_in_tutorial": false,
+      "technical_claims": true,
+      "source_reference": "PDF 第 17 页",
+      "status": "reference-only"
+    }
+  ]
+}

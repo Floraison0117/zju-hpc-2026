@@ -1,0 +1,26 @@
+case,scope,implementation,correctness,median_ms,reference_over_student
+2026-07-24 09:02:02  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_raw_qk` with `out_idx=None`
+2026-07-24 09:02:07  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_raw_qk`
+2026-07-24 09:02:08  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_persistent_tensorcore` with `out_idx=None`
+2026-07-24 09:02:16  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_persistent_tensorcore`
+parallel_equal,student_core,student,PASS,1.637296,
+2026-07-24 09:02:18  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_raw_qk` with `out_idx=None`
+2026-07-24 09:02:22  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_raw_qk`
+2026-07-24 09:02:23  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_persistent_tensorcore` with `out_idx=None`
+2026-07-24 09:02:31  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_persistent_tensorcore`
+parallel_gva,student_core,student,PASS,1.510352,
+2026-07-24 09:02:34  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_persistent_tensorcore` with `out_idx=None`
+2026-07-24 09:02:42  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_persistent_tensorcore`
+wide_gva_state,student_core,student,PASS,20.297840,
+parallel_equal,full_forward,student,PASS,1.739552,
+parallel_equal,full_forward,flash_qla,PASS,0.468640,0.269403
+parallel_equal,full_forward,fla,PASS,0.950688,0.546513
+parallel_equal,full_forward,flashinfer,PASS,0.471136,0.270838
+parallel_gva,full_forward,student,PASS,1.608560,
+parallel_gva,full_forward,flash_qla,PASS,0.443488,0.275705
+parallel_gva,full_forward,fla,PASS,0.852064,0.529706
+parallel_gva,full_forward,flashinfer,PASS,0.448304,0.278699
+wide_gva_state,full_forward,student,PASS,21.599360,
+wide_gva_state,full_forward,flash_qla,PASS,3.335008,0.154403
+wide_gva_state,full_forward,fla,PASS,12.556800,0.581351
+wide_gva_state,full_forward,flashinfer,PASS,2.338256,0.108256

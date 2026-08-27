@@ -1,0 +1,42 @@
+{
+  "tutorial": "ascend-c/tutorials/03-ascend-c-programming-model.typ",
+  "source": "ascend-c/source/03-ascend-c-programming-model.pptx",
+  "visuals": [
+    {
+      "id": "aicore-decorative",
+      "kind": "ai-decorative",
+      "purpose": "为 AI Core 工厂类比提供章节引入画面",
+      "file": "ascend-c/tutorials/assets/03-ascend-c-programming-model/aicore-factory-decorative-v1.png",
+      "used_in_tutorial": true,
+      "technical_claims": false,
+      "min_width_px": 1500,
+      "generator": "built-in image_gen",
+      "prompt": "Use case: stylized-concept\nAsset type: Chinese Ascend C tutorial chapter-opening decorative illustration\nPrimary request: an abstract modern factory metaphor for coordinated computation, with separate glowing work zones and streams of small material blocks moving smoothly between them\nScene/backdrop: spacious dark teal workshop-like abstract environment, clean and minimal\nSubject: geometric work zones, conveyors, and light trails as a metaphor only, not a hardware diagram\nStyle/medium: premium editorial 3D illustration with soft depth and precise geometry\nComposition/framing: wide landscape, balanced flow from input through work zones to output, generous margins\nLighting/mood: teal, jade, and restrained coral highlights, orderly and optimistic\nConstraints: decorative only; no text, no letters, no numbers, no logos, no watermark, no recognizable processor, no labeled components, no technical architecture claims\nAvoid: infographic layout, semantic labels, branded hardware, realistic factory workers, dense clutter",
+      "status": "accepted"
+    },
+    {
+      "id": "aicore-data-path",
+      "kind": "vector-redraw",
+      "purpose": "解释 HBM、DMA、Local Memory、Vector Unit、Cube Unit 和 Scalar Unit 的宏观关系",
+      "implementation_file": "ascend-c/tutorials/03-ascend-c-programming-model-visuals.typ",
+      "function": "aicore-data-path",
+      "source_reference": "PPTX 第 5 页",
+      "technical_claims": true,
+      "status": "accepted"
+    },
+    {
+      "id": "ascend-pipeline-stages",
+      "kind": "vector-redraw",
+      "purpose": "解释同一数据切片的 Stage 依赖",
+      "implementation_file": "ascend-c/tutorials/03-ascend-c-programming-model-visuals.typ",
+      "function": "pipeline-stages",
+      "source_reference": "PPTX 第 8 至 9 页",
+      "source_assets": [
+        "ascend-c/tutorials/assets/03-ascend-c-programming-model/source-slide08-pipeline-stages.png",
+        "ascend-c/tutorials/assets/03-ascend-c-programming-model/source-slide09-pipeline-timeline.png"
+      ],
+      "technical_claims": true,
+      "status": "accepted"
+    }
+  ]
+}

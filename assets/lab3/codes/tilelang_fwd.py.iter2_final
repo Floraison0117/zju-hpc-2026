@@ -1,0 +1,1312 @@
+import os
+
+import torch
+import tilelang
+import tilelang.language as T
+
+CHUNK_SIZE = 64
+HEAD_DIM = 128
+OUTPUT_SCALE = HEAD_DIM**-0.5
+LOG2E = 1.4426950408889634
+VALUE_TILE = int(os.environ.get("GDN_VALUE_TILE", "16"))
+
+if VALUE_TILE not in (8, 16):
+    raise ValueError("GDN_VALUE_TILE must be 8 or 16")
+if HEAD_DIM % VALUE_TILE != 0:
+    raise ValueError("VALUE_TILE must divide HEAD_DIM")
+
+
+@tilelang.jit
+def tilelang_compute_w_u(
+    Hq,
+    Hv,
+    qk_dtype,
+    v_dtype,
+    gate_dtype,
+    accum_dtype,
+):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+
+    k_shape = (batch_size, num_tokens, Hq, HEAD_DIM)
+    v_shape = (batch_size, num_tokens, Hv, HEAD_DIM)
+    gate_shape = (batch_size, num_tokens, Hv)
+    a_shape = (batch_size, num_tokens, Hv, CHUNK_SIZE)
+    temp_shape = (batch_size, Hv, CHUNK_SIZE, HEAD_DIM)
+
+    @T.prim_func
+    def gdn_compute_w_u(
+        k: T.Tensor(k_shape, qk_dtype),
+        v: T.Tensor(v_shape, v_dtype),
+        g_cumsum: T.Tensor(gate_shape, gate_dtype),
+        beta: T.Tensor(gate_shape, gate_dtype),
+        A: T.Tensor(a_shape, qk_dtype),
+        W: T.Tensor(temp_shape, accum_dtype),
+        U: T.Tensor(temp_shape, accum_dtype),
+        chunk_start: T.int32,
+        chunk_length: T.int32,
+        total_blocks: T.int32,
+    ):
+        with T.Kernel(total_blocks, threads=128) as (block,):
+            token = block % CHUNK_SIZE
+            value_head = (block // CHUNK_SIZE) % Hv
+            batch = block // (CHUNK_SIZE * Hv)
+            qk_head = value_head // (Hv // Hq)
+
+            w_acc = T.alloc_fragment((HEAD_DIM,), accum_dtype)
+            u_acc = T.alloc_fragment((HEAD_DIM,), accum_dtype)
+            T.clear(w_acc)
+            T.clear(u_acc)
+
+            if token < chunk_length:
+                for dim in T.Parallel(HEAD_DIM):
+                    for source in T.serial(CHUNK_SIZE):
+                        if source < chunk_length:
+                            w_acc[dim] += (
+                                A[
+                                    batch,
+                                    chunk_start + token,
+                                    value_head,
+                                    source,
+                                ]
+                                * beta[
+                                    batch,
+                                    chunk_start + source,
+                                    value_head,
+                                ]
+                                * T.exp(
+                                    g_cumsum[
+                                        batch,
+                                        chunk_start + source,
+                                        value_head,
+                                    ]
+                                )
+                                * k[
+                                    batch,
+                                    chunk_start + source,
+                                    qk_head,
+                                    dim,
+                                ]
+                            )
+                            u_acc[dim] += (
+                                A[
+                                    batch,
+                                    chunk_start + token,
+                                    value_head,
+                                    source,
+                                ]
+                                * beta[
+                                    batch,
+                                    chunk_start + source,
+                                    value_head,
+                                ]
+                                * v[
+                                    batch,
+                                    chunk_start + source,
+                                    value_head,
+                                    dim,
+                                ]
+                            )
+
+            for dim in T.Parallel(HEAD_DIM):
+                W[batch, value_head, token, dim] = w_acc[dim]
+                U[batch, value_head, token, dim] = u_acc[dim]
+
+    return gdn_compute_w_u
+
+
+def compute_w_u(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    chunk_start: int,
+    chunk_length: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch_size, _, num_heads_qk, head_dim = k.shape
+    num_heads_v = v.shape[2]
+    if head_dim != HEAD_DIM:
+        raise ValueError(f"expected head dimension {HEAD_DIM}, got {head_dim}")
+    if num_heads_v % num_heads_qk != 0:
+        raise ValueError("Hv must be divisible by Hq")
+    if not 0 < chunk_length <= CHUNK_SIZE:
+        raise ValueError("chunk_length must be in [1, 64]")
+
+    temp_shape = (batch_size, num_heads_v, CHUNK_SIZE, HEAD_DIM)
+    W = torch.empty(temp_shape, dtype=torch.float32, device=k.device)
+    U = torch.empty(temp_shape, dtype=torch.float32, device=k.device)
+
+    kernel = tilelang_compute_w_u(
+        num_heads_qk,
+        num_heads_v,
+        qk_dtype=k.dtype,
+        v_dtype=v.dtype,
+        gate_dtype=g_cumsum.dtype,
+        accum_dtype="float32",
+    )
+    total_blocks = batch_size * num_heads_v * CHUNK_SIZE
+    kernel(
+        k,
+        v,
+        g_cumsum,
+        beta,
+        A,
+        W,
+        U,
+        chunk_start,
+        chunk_length,
+        total_blocks,
+    )
+    return W, U
+
+
+@tilelang.jit
+def tilelang_compute_v_new(Hv, accum_dtype):
+    batch_size = T.dynamic("batch_size")
+    temp_shape = (batch_size, Hv, CHUNK_SIZE, HEAD_DIM)
+    state_shape = (batch_size, Hv, HEAD_DIM, HEAD_DIM)
+
+    @T.prim_func
+    def gdn_compute_v_new(
+        W: T.Tensor(temp_shape, accum_dtype),
+        U: T.Tensor(temp_shape, accum_dtype),
+        state: T.Tensor(state_shape, accum_dtype),
+        V_new: T.Tensor(temp_shape, accum_dtype),
+        chunk_length: T.int32,
+        total_blocks: T.int32,
+    ):
+        with T.Kernel(total_blocks, threads=128) as (block,):
+            token = block % CHUNK_SIZE
+            value_head = (block // CHUNK_SIZE) % Hv
+            batch = block // (CHUNK_SIZE * Hv)
+
+            output_acc = T.alloc_fragment((HEAD_DIM,), accum_dtype)
+            T.clear(output_acc)
+
+            if token < chunk_length:
+                for value_dim in T.Parallel(HEAD_DIM):
+                    output_acc[value_dim] = U[
+                        batch, value_head, token, value_dim
+                    ]
+                    for key_dim in T.serial(HEAD_DIM):
+                        output_acc[value_dim] -= (
+                            W[batch, value_head, token, key_dim]
+                            * state[batch, value_head, key_dim, value_dim]
+                        )
+
+            for value_dim in T.Parallel(HEAD_DIM):
+                V_new[batch, value_head, token, value_dim] = output_acc[value_dim]
+
+    return gdn_compute_v_new
+
+
+def compute_v_new(
+    W: torch.Tensor,
+    U: torch.Tensor,
+    state: torch.Tensor,
+    chunk_length: int,
+) -> torch.Tensor:
+    if W.shape != U.shape:
+        raise ValueError("W and U must have the same shape")
+    if W.dtype != torch.float32 or U.dtype != torch.float32:
+        raise ValueError("W and U must be FP32")
+    batch_size, num_heads_v, chunk_size, head_dim = W.shape
+    if (chunk_size, head_dim) != (CHUNK_SIZE, HEAD_DIM):
+        raise ValueError("W and U must have shape [B, Hv, 64, 128]")
+    expected_state_shape = (batch_size, num_heads_v, HEAD_DIM, HEAD_DIM)
+    if state.shape != expected_state_shape or state.dtype != torch.float32:
+        raise ValueError("state must be FP32 with shape [B, Hv, 128, 128]")
+    if not 0 < chunk_length <= CHUNK_SIZE:
+        raise ValueError("chunk_length must be in [1, 64]")
+
+    V_new = torch.empty_like(U)
+    kernel = tilelang_compute_v_new(num_heads_v, accum_dtype="float32")
+    total_blocks = batch_size * num_heads_v * CHUNK_SIZE
+    kernel(W, U, state, V_new, chunk_length, total_blocks)
+    return V_new
+
+
+@tilelang.jit
+def tilelang_compute_residual(
+    Hq,
+    Hv,
+    qk_dtype,
+    v_dtype,
+    gate_dtype,
+    accum_dtype,
+):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+
+    k_shape = (batch_size, num_tokens, Hq, HEAD_DIM)
+    v_shape = (batch_size, num_tokens, Hv, HEAD_DIM)
+    gate_shape = (batch_size, num_tokens, Hv)
+    state_shape = (batch_size, Hv, HEAD_DIM, HEAD_DIM)
+    temp_shape = (batch_size, Hv, CHUNK_SIZE, HEAD_DIM)
+
+    @T.prim_func
+    def gdn_compute_residual(
+        k: T.Tensor(k_shape, qk_dtype),
+        v: T.Tensor(v_shape, v_dtype),
+        g_cumsum: T.Tensor(gate_shape, gate_dtype),
+        state: T.Tensor(state_shape, accum_dtype),
+        residual: T.Tensor(temp_shape, accum_dtype),
+        chunk_start: T.int32,
+        chunk_length: T.int32,
+        total_blocks: T.int32,
+    ):
+        with T.Kernel(total_blocks, threads=128) as (block,):
+            token = block % CHUNK_SIZE
+            value_head = (block // CHUNK_SIZE) % Hv
+            batch = block // (CHUNK_SIZE * Hv)
+            qk_head = value_head // (Hv // Hq)
+
+            residual_acc = T.alloc_fragment((HEAD_DIM,), accum_dtype)
+            T.clear(residual_acc)
+
+            if token < chunk_length:
+                for value_dim in T.Parallel(HEAD_DIM):
+                    for key_dim in T.serial(HEAD_DIM):
+                        residual_acc[value_dim] += (
+                            k[
+                                batch,
+                                chunk_start + token,
+                                qk_head,
+                                key_dim,
+                            ]
+                            * state[
+                                batch,
+                                value_head,
+                                key_dim,
+                                value_dim,
+                            ]
+                        )
+                    residual_acc[value_dim] = v[
+                        batch,
+                        chunk_start + token,
+                        value_head,
+                        value_dim,
+                    ] - T.exp(
+                        g_cumsum[
+                            batch,
+                            chunk_start + token,
+                            value_head,
+                        ]
+                    ) * residual_acc[value_dim]
+
+            for value_dim in T.Parallel(HEAD_DIM):
+                residual[
+                    batch,
+                    value_head,
+                    token,
+                    value_dim,
+                ] = residual_acc[value_dim]
+
+    return gdn_compute_residual
+
+
+def compute_residual(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    state: torch.Tensor,
+    chunk_start: int,
+    chunk_length: int,
+) -> torch.Tensor:
+    batch_size, num_tokens, num_heads_qk, head_dim = k.shape
+    num_heads_v = v.shape[2]
+    if head_dim != HEAD_DIM:
+        raise ValueError(f"expected head dimension {HEAD_DIM}, got {head_dim}")
+    if num_heads_v % num_heads_qk != 0:
+        raise ValueError("Hv must be divisible by Hq")
+    if not 0 < chunk_length <= CHUNK_SIZE:
+        raise ValueError("chunk_length must be in [1, 64]")
+    if chunk_start < 0 or chunk_start + chunk_length > num_tokens:
+        raise ValueError("chunk range is outside the sequence")
+
+    residual = torch.empty(
+        (batch_size, num_heads_v, CHUNK_SIZE, HEAD_DIM),
+        dtype=torch.float32,
+        device=k.device,
+    )
+    kernel = tilelang_compute_residual(
+        num_heads_qk,
+        num_heads_v,
+        qk_dtype=k.dtype,
+        v_dtype=v.dtype,
+        gate_dtype=g_cumsum.dtype,
+        accum_dtype="float32",
+    )
+    total_blocks = batch_size * num_heads_v * CHUNK_SIZE
+    kernel(
+        k,
+        v,
+        g_cumsum,
+        state,
+        residual,
+        chunk_start,
+        chunk_length,
+        total_blocks,
+    )
+    return residual
+
+
+@tilelang.jit
+def tilelang_apply_ab(Hv, qk_dtype, gate_dtype, accum_dtype):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+
+    gate_shape = (batch_size, num_tokens, Hv)
+    a_shape = (batch_size, num_tokens, Hv, CHUNK_SIZE)
+    temp_shape = (batch_size, Hv, CHUNK_SIZE, HEAD_DIM)
+
+    @T.prim_func
+    def gdn_apply_ab(
+        residual: T.Tensor(temp_shape, accum_dtype),
+        beta: T.Tensor(gate_shape, gate_dtype),
+        A: T.Tensor(a_shape, qk_dtype),
+        V_new: T.Tensor(temp_shape, accum_dtype),
+        chunk_start: T.int32,
+        chunk_length: T.int32,
+        total_blocks: T.int32,
+    ):
+        with T.Kernel(total_blocks, threads=128) as (block,):
+            token = block % CHUNK_SIZE
+            value_head = (block // CHUNK_SIZE) % Hv
+            batch = block // (CHUNK_SIZE * Hv)
+
+            output_acc = T.alloc_fragment((HEAD_DIM,), accum_dtype)
+            T.clear(output_acc)
+
+            if token < chunk_length:
+                for value_dim in T.Parallel(HEAD_DIM):
+                    for source in T.serial(CHUNK_SIZE):
+                        if source <= token and source < chunk_length:
+                            output_acc[value_dim] += (
+                                A[
+                                    batch,
+                                    chunk_start + token,
+                                    value_head,
+                                    source,
+                                ]
+                                * beta[
+                                    batch,
+                                    chunk_start + source,
+                                    value_head,
+                                ]
+                                * residual[
+                                    batch,
+                                    value_head,
+                                    source,
+                                    value_dim,
+                                ]
+                            )
+
+            for value_dim in T.Parallel(HEAD_DIM):
+                V_new[
+                    batch,
+                    value_head,
+                    token,
+                    value_dim,
+                ] = output_acc[value_dim]
+
+    return gdn_apply_ab
+
+
+def apply_ab(
+    residual: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    chunk_start: int,
+    chunk_length: int,
+) -> torch.Tensor:
+    batch_size, num_heads_v, chunk_size, head_dim = residual.shape
+    if (chunk_size, head_dim) != (CHUNK_SIZE, HEAD_DIM):
+        raise ValueError("residual must have shape [B, Hv, 64, 128]")
+    if residual.dtype != torch.float32:
+        raise ValueError("residual must be FP32")
+
+    V_new = torch.empty_like(residual)
+    kernel = tilelang_apply_ab(
+        num_heads_v,
+        qk_dtype=A.dtype,
+        gate_dtype=beta.dtype,
+        accum_dtype="float32",
+    )
+    total_blocks = batch_size * num_heads_v * CHUNK_SIZE
+    kernel(
+        residual,
+        beta,
+        A,
+        V_new,
+        chunk_start,
+        chunk_length,
+        total_blocks,
+    )
+    return V_new
+
+
+@tilelang.jit
+def tilelang_compute_scores(Hq, Hv, qk_dtype, gate_dtype, accum_dtype):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    qk_shape = (batch_size, num_tokens, Hq, HEAD_DIM)
+    gate_shape = (batch_size, num_tokens, Hv)
+    score_shape = (batch_size, Hv, CHUNK_SIZE, CHUNK_SIZE)
+
+    @T.prim_func
+    def gdn_compute_scores(
+        q: T.Tensor(qk_shape, qk_dtype),
+        k: T.Tensor(qk_shape, qk_dtype),
+        g_cumsum: T.Tensor(gate_shape, gate_dtype),
+        scores: T.Tensor(score_shape, accum_dtype),
+        chunk_start: T.int32,
+        chunk_length: T.int32,
+        total_blocks: T.int32,
+    ):
+        with T.Kernel(total_blocks, threads=128) as (block,):
+            query_token = block % CHUNK_SIZE
+            value_head = (block // CHUNK_SIZE) % Hv
+            batch = block // (CHUNK_SIZE * Hv)
+            qk_head = value_head // (Hv // Hq)
+
+            score_acc = T.alloc_fragment((CHUNK_SIZE,), accum_dtype)
+            T.clear(score_acc)
+
+            if query_token < chunk_length:
+                for source_token in T.Parallel(CHUNK_SIZE):
+                    if source_token <= query_token and source_token < chunk_length:
+                        for dim in T.serial(HEAD_DIM):
+                            score_acc[source_token] += (
+                                q[
+                                    batch,
+                                    chunk_start + query_token,
+                                    qk_head,
+                                    dim,
+                                ]
+                                * k[
+                                    batch,
+                                    chunk_start + source_token,
+                                    qk_head,
+                                    dim,
+                                ]
+                            )
+                        score_acc[source_token] *= T.exp(
+                            g_cumsum[
+                                batch,
+                                chunk_start + query_token,
+                                value_head,
+                            ]
+                            - g_cumsum[
+                                batch,
+                                chunk_start + source_token,
+                                value_head,
+                            ]
+                        )
+
+            for source_token in T.Parallel(CHUNK_SIZE):
+                scores[
+                    batch, value_head, query_token, source_token
+                ] = score_acc[source_token]
+
+    return gdn_compute_scores
+
+
+def compute_scores(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    chunk_start: int,
+    chunk_length: int,
+) -> torch.Tensor:
+    if q.shape != k.shape or q.dtype != k.dtype:
+        raise ValueError("q and k must have the same shape and dtype")
+    batch_size, num_tokens, num_heads_qk, head_dim = q.shape
+    if head_dim != HEAD_DIM:
+        raise ValueError(f"expected head dimension {HEAD_DIM}, got {head_dim}")
+    expected_gate_prefix = (batch_size, num_tokens)
+    if g_cumsum.shape[:2] != expected_gate_prefix:
+        raise ValueError("g_cumsum must match q/k batch and sequence dimensions")
+    num_heads_v = g_cumsum.shape[2]
+    if num_heads_v % num_heads_qk != 0:
+        raise ValueError("Hv must be divisible by Hq")
+    if not 0 < chunk_length <= CHUNK_SIZE:
+        raise ValueError("chunk_length must be in [1, 64]")
+    if chunk_start < 0 or chunk_start + chunk_length > num_tokens:
+        raise ValueError("chunk range is outside the sequence")
+
+    scores = torch.empty(
+        (batch_size, num_heads_v, CHUNK_SIZE, CHUNK_SIZE),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    kernel = tilelang_compute_scores(
+        num_heads_qk,
+        num_heads_v,
+        qk_dtype=q.dtype,
+        gate_dtype=g_cumsum.dtype,
+        accum_dtype="float32",
+    )
+    total_blocks = batch_size * num_heads_v * CHUNK_SIZE
+    kernel(
+        q,
+        k,
+        g_cumsum,
+        scores,
+        chunk_start,
+        chunk_length,
+        total_blocks,
+    )
+    return scores
+
+
+@tilelang.jit
+def tilelang_compute_output(Hq, Hv, q_dtype, gate_dtype, accum_dtype):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    q_shape = (batch_size, num_tokens, Hq, HEAD_DIM)
+    gate_shape = (batch_size, num_tokens, Hv)
+    score_shape = (batch_size, Hv, CHUNK_SIZE, CHUNK_SIZE)
+    temp_shape = (batch_size, Hv, CHUNK_SIZE, HEAD_DIM)
+    state_shape = (batch_size, Hv, HEAD_DIM, HEAD_DIM)
+    output_shape = (batch_size, num_tokens, Hv, HEAD_DIM)
+
+    @T.prim_func
+    def gdn_compute_output(
+        q: T.Tensor(q_shape, q_dtype),
+        g_cumsum: T.Tensor(gate_shape, gate_dtype),
+        scores: T.Tensor(score_shape, accum_dtype),
+        V_new: T.Tensor(temp_shape, accum_dtype),
+        state: T.Tensor(state_shape, accum_dtype),
+        output: T.Tensor(output_shape, q_dtype),
+        chunk_start: T.int32,
+        chunk_length: T.int32,
+        total_blocks: T.int32,
+    ):
+        with T.Kernel(total_blocks, threads=128) as (block,):
+            query_token = block % CHUNK_SIZE
+            value_head = (block // CHUNK_SIZE) % Hv
+            batch = block // (CHUNK_SIZE * Hv)
+            qk_head = value_head // (Hv // Hq)
+
+            output_acc = T.alloc_fragment((HEAD_DIM,), accum_dtype)
+            T.clear(output_acc)
+
+            if query_token < chunk_length:
+                for value_dim in T.Parallel(HEAD_DIM):
+                    for key_dim in T.serial(HEAD_DIM):
+                        output_acc[value_dim] += (
+                            q[
+                                batch,
+                                chunk_start + query_token,
+                                qk_head,
+                                key_dim,
+                            ]
+                            * state[
+                                batch, value_head, key_dim, value_dim
+                            ]
+                        )
+                    output_acc[value_dim] *= T.exp(
+                        g_cumsum[
+                            batch,
+                            chunk_start + query_token,
+                            value_head,
+                        ]
+                    )
+                    for source_token in T.serial(CHUNK_SIZE):
+                        output_acc[value_dim] += (
+                            scores[
+                                batch,
+                                value_head,
+                                query_token,
+                                source_token,
+                            ]
+                            * V_new[
+                                batch,
+                                value_head,
+                                source_token,
+                                value_dim,
+                            ]
+                        )
+                    output[
+                        batch,
+                        chunk_start + query_token,
+                        value_head,
+                        value_dim,
+                    ] = output_acc[value_dim] * OUTPUT_SCALE
+
+    return gdn_compute_output
+
+
+def compute_output(
+    q: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    scores: torch.Tensor,
+    V_new: torch.Tensor,
+    state: torch.Tensor,
+    chunk_start: int,
+    chunk_length: int,
+    output: torch.Tensor | None = None,
+) -> torch.Tensor:
+    batch_size, num_tokens, num_heads_qk, head_dim = q.shape
+    if head_dim != HEAD_DIM:
+        raise ValueError(f"expected head dimension {HEAD_DIM}, got {head_dim}")
+    num_heads_v = g_cumsum.shape[2]
+    if num_heads_v % num_heads_qk != 0:
+        raise ValueError("Hv must be divisible by Hq")
+    if g_cumsum.shape[:2] != (batch_size, num_tokens):
+        raise ValueError("g_cumsum must match q batch and sequence dimensions")
+    expected_scores = (batch_size, num_heads_v, CHUNK_SIZE, CHUNK_SIZE)
+    expected_temp = (batch_size, num_heads_v, CHUNK_SIZE, HEAD_DIM)
+    expected_state = (batch_size, num_heads_v, HEAD_DIM, HEAD_DIM)
+    if scores.shape != expected_scores or scores.dtype != torch.float32:
+        raise ValueError("scores must be FP32 with shape [B, Hv, 64, 64]")
+    if V_new.shape != expected_temp or V_new.dtype != torch.float32:
+        raise ValueError("V_new must be FP32 with shape [B, Hv, 64, 128]")
+    if state.shape != expected_state or state.dtype != torch.float32:
+        raise ValueError("state must be FP32 with shape [B, Hv, 128, 128]")
+    if not 0 < chunk_length <= CHUNK_SIZE:
+        raise ValueError("chunk_length must be in [1, 64]")
+    if chunk_start < 0 or chunk_start + chunk_length > num_tokens:
+        raise ValueError("chunk range is outside the sequence")
+
+    expected_output = (batch_size, num_tokens, num_heads_v, HEAD_DIM)
+    if output is None:
+        output = torch.empty(expected_output, dtype=q.dtype, device=q.device)
+    elif output.shape != expected_output or output.dtype != q.dtype:
+        raise ValueError("output has an invalid shape or dtype")
+
+    kernel = tilelang_compute_output(
+        num_heads_qk,
+        num_heads_v,
+        q_dtype=q.dtype,
+        gate_dtype=g_cumsum.dtype,
+        accum_dtype="float32",
+    )
+    total_blocks = batch_size * num_heads_v * CHUNK_SIZE
+    kernel(
+        q,
+        g_cumsum,
+        scores,
+        V_new,
+        state,
+        output,
+        chunk_start,
+        chunk_length,
+        total_blocks,
+    )
+    return output
+
+
+@tilelang.jit
+def tilelang_update_state(Hq, Hv, k_dtype, gate_dtype, accum_dtype):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    k_shape = (batch_size, num_tokens, Hq, HEAD_DIM)
+    gate_shape = (batch_size, num_tokens, Hv)
+    temp_shape = (batch_size, Hv, CHUNK_SIZE, HEAD_DIM)
+    state_shape = (batch_size, Hv, HEAD_DIM, HEAD_DIM)
+
+    @T.prim_func
+    def gdn_update_state(
+        k: T.Tensor(k_shape, k_dtype),
+        g_cumsum: T.Tensor(gate_shape, gate_dtype),
+        V_new: T.Tensor(temp_shape, accum_dtype),
+        state: T.Tensor(state_shape, accum_dtype),
+        chunk_start: T.int32,
+        chunk_length: T.int32,
+        total_blocks: T.int32,
+    ):
+        with T.Kernel(total_blocks, threads=128) as (block,):
+            key_dim = block % HEAD_DIM
+            value_head = (block // HEAD_DIM) % Hv
+            batch = block // (HEAD_DIM * Hv)
+            qk_head = value_head // (Hv // Hq)
+            last_token = chunk_start + chunk_length - 1
+
+            state_acc = T.alloc_fragment((HEAD_DIM,), accum_dtype)
+            T.clear(state_acc)
+
+            for value_dim in T.Parallel(HEAD_DIM):
+                state_acc[value_dim] = (
+                    T.exp(g_cumsum[batch, last_token, value_head])
+                    * state[batch, value_head, key_dim, value_dim]
+                )
+                for token in T.serial(CHUNK_SIZE):
+                    if token < chunk_length:
+                        state_acc[value_dim] += (
+                            k[
+                                batch,
+                                chunk_start + token,
+                                qk_head,
+                                key_dim,
+                            ]
+                            * T.exp(
+                                g_cumsum[batch, last_token, value_head]
+                                - g_cumsum[
+                                    batch,
+                                    chunk_start + token,
+                                    value_head,
+                                ]
+                            )
+                            * V_new[
+                                batch, value_head, token, value_dim
+                            ]
+                        )
+                state[batch, value_head, key_dim, value_dim] = state_acc[
+                    value_dim
+                ]
+
+    return gdn_update_state
+
+
+def update_state(
+    k: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    V_new: torch.Tensor,
+    state: torch.Tensor,
+    chunk_start: int,
+    chunk_length: int,
+) -> torch.Tensor:
+    batch_size, num_tokens, num_heads_qk, head_dim = k.shape
+    if head_dim != HEAD_DIM:
+        raise ValueError(f"expected head dimension {HEAD_DIM}, got {head_dim}")
+    num_heads_v = g_cumsum.shape[2]
+    if num_heads_v % num_heads_qk != 0:
+        raise ValueError("Hv must be divisible by Hq")
+    if g_cumsum.shape[:2] != (batch_size, num_tokens):
+        raise ValueError("g_cumsum must match k batch and sequence dimensions")
+    expected_temp = (batch_size, num_heads_v, CHUNK_SIZE, HEAD_DIM)
+    expected_state = (batch_size, num_heads_v, HEAD_DIM, HEAD_DIM)
+    if V_new.shape != expected_temp or V_new.dtype != torch.float32:
+        raise ValueError("V_new must be FP32 with shape [B, Hv, 64, 128]")
+    if state.shape != expected_state or state.dtype != torch.float32:
+        raise ValueError("state must be FP32 with shape [B, Hv, 128, 128]")
+    if not 0 < chunk_length <= CHUNK_SIZE:
+        raise ValueError("chunk_length must be in [1, 64]")
+    if chunk_start < 0 or chunk_start + chunk_length > num_tokens:
+        raise ValueError("chunk range is outside the sequence")
+
+    kernel = tilelang_update_state(
+        num_heads_qk,
+        num_heads_v,
+        k_dtype=k.dtype,
+        gate_dtype=g_cumsum.dtype,
+        accum_dtype="float32",
+    )
+    total_blocks = batch_size * num_heads_v * HEAD_DIM
+    kernel(
+        k,
+        g_cumsum,
+        V_new,
+        state,
+        chunk_start,
+        chunk_length,
+        total_blocks,
+    )
+    return state
+
+
+@tilelang.jit
+def tilelang_raw_qk(Hq, qk_dtype, accum_dtype):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    num_chunks = T.dynamic("num_chunks")
+
+    qk_shape = (batch_size, num_tokens, Hq, HEAD_DIM)
+    raw_qk_shape = (
+        batch_size,
+        num_chunks,
+        Hq,
+        CHUNK_SIZE,
+        CHUNK_SIZE,
+    )
+
+    @T.prim_func
+    def gdn_raw_qk(
+        q: T.Tensor(qk_shape, qk_dtype),
+        k: T.Tensor(qk_shape, qk_dtype),
+        raw_qk: T.Tensor(raw_qk_shape, accum_dtype),
+        total_blocks: T.int32,
+    ):
+        with T.Kernel(total_blocks, threads=128) as (block,):
+            qk_head = block % Hq
+            chunk = (block // Hq) % num_chunks
+            batch = block // (Hq * num_chunks)
+            chunk_start = chunk * CHUNK_SIZE
+
+            q_shared = T.alloc_shared(
+                (CHUNK_SIZE, HEAD_DIM), dtype=qk_dtype
+            )
+            k_shared = T.alloc_shared(
+                (CHUNK_SIZE, HEAD_DIM), dtype=qk_dtype
+            )
+            score_fragment = T.alloc_fragment(
+                (CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype
+            )
+
+            for token, dim in T.Parallel(CHUNK_SIZE, HEAD_DIM):
+                if chunk_start + token < num_tokens:
+                    q_shared[token, dim] = q[
+                        batch, chunk_start + token, qk_head, dim
+                    ]
+                    k_shared[token, dim] = k[
+                        batch, chunk_start + token, qk_head, dim
+                    ]
+                else:
+                    q_shared[token, dim] = 0
+                    k_shared[token, dim] = 0
+
+            T.gemm(
+                q_shared,
+                k_shared,
+                score_fragment,
+                transpose_B=True,
+                clear_accum=True,
+            )
+            for row, col in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
+                raw_qk[batch, chunk, qk_head, row, col] = (
+                    score_fragment[row, col]
+                )
+
+    return gdn_raw_qk
+
+
+def compute_raw_qk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+) -> torch.Tensor:
+    if q.shape != k.shape or q.dtype != k.dtype:
+        raise ValueError("q and k must have the same shape and dtype")
+    batch_size, num_tokens, num_heads_qk, head_dim = q.shape
+    if head_dim != HEAD_DIM:
+        raise ValueError(f"expected head dimension {HEAD_DIM}, got {head_dim}")
+
+    num_chunks = tilelang.cdiv(num_tokens, CHUNK_SIZE)
+    raw_qk = torch.empty(
+        (
+            batch_size,
+            num_chunks,
+            num_heads_qk,
+            CHUNK_SIZE,
+            CHUNK_SIZE,
+        ),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    kernel = tilelang_raw_qk(
+        num_heads_qk,
+        qk_dtype=q.dtype,
+        accum_dtype="float32",
+    )
+    kernel(q, k, raw_qk, batch_size * num_chunks * num_heads_qk)
+    return raw_qk
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+)
+def tilelang_fused_chunk(
+    Hq,
+    Hv,
+    value_tile,
+    qk_dtype,
+    v_dtype,
+    gate_dtype,
+    accum_dtype,
+):
+    batch_size = T.dynamic("batch_size")
+    num_tokens = T.dynamic("num_tokens")
+    num_chunks = T.dynamic("num_chunks")
+
+    qk_shape = (batch_size, num_tokens, Hq, HEAD_DIM)
+    v_shape = (batch_size, num_tokens, Hv, HEAD_DIM)
+    gate_shape = (batch_size, num_tokens, Hv)
+    a_shape = (batch_size, num_tokens, Hv, CHUNK_SIZE)
+    raw_qk_shape = (
+        batch_size,
+        num_chunks,
+        Hq,
+        CHUNK_SIZE,
+        CHUNK_SIZE,
+    )
+    state_shape = (batch_size, Hv, HEAD_DIM, HEAD_DIM)
+    output_shape = (batch_size, num_tokens, Hv, HEAD_DIM)
+    value_tiles = HEAD_DIM // value_tile
+
+    @T.prim_func
+    def gdn_fused_chunk(
+        q: T.Tensor(qk_shape, qk_dtype),
+        k: T.Tensor(qk_shape, qk_dtype),
+        v: T.Tensor(v_shape, v_dtype),
+        g_cumsum: T.Tensor(gate_shape, gate_dtype),
+        beta: T.Tensor(gate_shape, gate_dtype),
+        A: T.Tensor(a_shape, qk_dtype),
+        raw_qk: T.Tensor(raw_qk_shape, accum_dtype),
+        state: T.Tensor(state_shape, accum_dtype),
+        output: T.Tensor(output_shape, qk_dtype),
+        chunk_start: T.int32,
+        chunk_length: T.int32,
+        total_blocks: T.int32,
+    ):
+        with T.Kernel(total_blocks, threads=128) as (block,):
+            value_tile_index = block % value_tiles
+            value_head = (block // value_tiles) % Hv
+            batch = block // (value_tiles * Hv)
+            qk_head = value_head // (Hv // Hq)
+            value_start = value_tile_index * value_tile
+            chunk = chunk_start // CHUNK_SIZE
+            last_token = chunk_start + chunk_length - 1
+
+            k_shared = T.alloc_shared(
+                (CHUNK_SIZE, HEAD_DIM), dtype=qk_dtype
+            )
+            a_shared = T.alloc_shared(
+                (CHUNK_SIZE, CHUNK_SIZE), dtype=qk_dtype
+            )
+            state_tile = T.alloc_shared(
+                (HEAD_DIM, value_tile), dtype=accum_dtype
+            )
+            residual_vnew = T.alloc_shared(
+                (CHUNK_SIZE, value_tile), dtype=accum_dtype
+            )
+            gate_shared = T.alloc_shared(
+                (CHUNK_SIZE,), dtype=accum_dtype
+            )
+            beta_shared = T.alloc_shared(
+                (CHUNK_SIZE,), dtype=accum_dtype
+            )
+            last_gate_shared = T.alloc_shared((1,), dtype=accum_dtype)
+
+            residual_acc = T.alloc_fragment(
+                (CHUNK_SIZE, value_tile), dtype=accum_dtype
+            )
+            row_acc = T.alloc_fragment((value_tile,), dtype=accum_dtype)
+            output_acc = T.alloc_fragment(
+                (CHUNK_SIZE, value_tile), dtype=accum_dtype
+            )
+            state_acc = T.alloc_fragment(
+                (HEAD_DIM, value_tile), dtype=accum_dtype
+            )
+
+            for token, key_dim in T.Parallel(CHUNK_SIZE, HEAD_DIM):
+                if token < chunk_length:
+                    k_shared[token, key_dim] = k[
+                        batch, chunk_start + token, qk_head, key_dim
+                    ]
+                else:
+                    k_shared[token, key_dim] = 0
+            for row, col in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
+                if row < chunk_length and col <= row:
+                    a_shared[row, col] = A[
+                        batch, chunk_start + row, value_head, col
+                    ]
+                else:
+                    a_shared[row, col] = 0
+            for key_dim, value_offset in T.Parallel(
+                HEAD_DIM, value_tile
+            ):
+                state_tile[key_dim, value_offset] = state[
+                    batch,
+                    value_head,
+                    key_dim,
+                    value_start + value_offset,
+                ]
+            for token in T.Parallel(CHUNK_SIZE):
+                if token < chunk_length:
+                    gate_shared[token] = g_cumsum[
+                        batch, chunk_start + token, value_head
+                    ]
+                    beta_shared[token] = beta[
+                        batch, chunk_start + token, value_head
+                    ]
+                else:
+                    gate_shared[token] = 0
+                    beta_shared[token] = 0
+            for slot in T.Parallel(1):
+                last_gate_shared[slot] = g_cumsum[
+                    batch, last_token, value_head
+                ]
+            T.sync_threads()
+
+            T.clear(residual_acc)
+            for token, value_offset in T.Parallel(
+                CHUNK_SIZE, value_tile
+            ):
+                if token < chunk_length:
+                    for key_dim in T.serial(HEAD_DIM):
+                        residual_acc[token, value_offset] += (
+                            k_shared[token, key_dim]
+                            * state_tile[key_dim, value_offset]
+                        )
+                    residual_vnew[token, value_offset] = v[
+                        batch,
+                        chunk_start + token,
+                        value_head,
+                        value_start + value_offset,
+                    ] - T.exp2(gate_shared[token] * LOG2E) * (
+                        residual_acc[token, value_offset]
+                    )
+                else:
+                    residual_vnew[token, value_offset] = 0
+            T.sync_threads()
+
+            for reverse_token in T.serial(CHUNK_SIZE):
+                token = CHUNK_SIZE - 1 - reverse_token
+                T.clear(row_acc)
+                for value_offset in T.Parallel(value_tile):
+                    if token < chunk_length:
+                        for source in T.serial(CHUNK_SIZE):
+                            if source <= token:
+                                row_acc[value_offset] += (
+                                    a_shared[token, source]
+                                    * beta_shared[source]
+                                    * residual_vnew[source, value_offset]
+                                )
+                        residual_vnew[token, value_offset] = row_acc[
+                            value_offset
+                        ]
+            T.sync_threads()
+
+            T.clear(output_acc)
+            for token, value_offset in T.Parallel(
+                CHUNK_SIZE, value_tile
+            ):
+                if token < chunk_length:
+                    for key_dim in T.serial(HEAD_DIM):
+                        output_acc[token, value_offset] += (
+                            q[
+                                batch,
+                                chunk_start + token,
+                                qk_head,
+                                key_dim,
+                            ]
+                            * state_tile[key_dim, value_offset]
+                        )
+                    output_acc[token, value_offset] *= T.exp2(
+                        gate_shared[token] * LOG2E
+                    )
+                    for source in T.serial(CHUNK_SIZE):
+                        if source <= token:
+                            output_acc[token, value_offset] += (
+                                raw_qk[
+                                    batch,
+                                    chunk,
+                                    qk_head,
+                                    token,
+                                    source,
+                                ]
+                                * T.exp2(
+                                    (
+                                        gate_shared[token]
+                                        - gate_shared[source]
+                                    )
+                                    * LOG2E
+                                )
+                                * residual_vnew[source, value_offset]
+                            )
+                    output[
+                        batch,
+                        chunk_start + token,
+                        value_head,
+                        value_start + value_offset,
+                    ] = output_acc[token, value_offset] * OUTPUT_SCALE
+            T.sync_threads()
+
+            T.clear(state_acc)
+            for key_dim, value_offset in T.Parallel(
+                HEAD_DIM, value_tile
+            ):
+                state_acc[key_dim, value_offset] = T.exp2(
+                    last_gate_shared[0] * LOG2E
+                ) * state_tile[key_dim, value_offset]
+                for token in T.serial(CHUNK_SIZE):
+                    if token < chunk_length:
+                        state_acc[key_dim, value_offset] += (
+                            k_shared[token, key_dim]
+                            * T.exp2(
+                                (
+                                    last_gate_shared[0]
+                                    - gate_shared[token]
+                                )
+                                * LOG2E
+                            )
+                            * residual_vnew[token, value_offset]
+                        )
+                state[
+                    batch,
+                    value_head,
+                    key_dim,
+                    value_start + value_offset,
+                ] = state_acc[key_dim, value_offset]
+
+    return gdn_fused_chunk
+
+
+def fused_chunk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    raw_qk: torch.Tensor,
+    state: torch.Tensor,
+    output: torch.Tensor,
+    chunk_start: int,
+    chunk_length: int,
+    value_tile: int = VALUE_TILE,
+) -> None:
+    batch_size, num_tokens, num_heads_qk, head_dim = q.shape
+    num_heads_v = v.shape[2]
+    if head_dim != HEAD_DIM:
+        raise ValueError(f"expected head dimension {HEAD_DIM}, got {head_dim}")
+    if value_tile not in (8, 16):
+        raise ValueError("value_tile must be 8 or 16")
+    if num_heads_v % num_heads_qk != 0:
+        raise ValueError("Hv must be divisible by Hq")
+    if not 0 < chunk_length <= CHUNK_SIZE:
+        raise ValueError("chunk_length must be in [1, 64]")
+    if chunk_start < 0 or chunk_start + chunk_length > num_tokens:
+        raise ValueError("chunk range is outside the sequence")
+
+    kernel = tilelang_fused_chunk(
+        num_heads_qk,
+        num_heads_v,
+        value_tile,
+        qk_dtype=q.dtype,
+        v_dtype=v.dtype,
+        gate_dtype=g_cumsum.dtype,
+        accum_dtype="float32",
+    )
+    total_blocks = (
+        batch_size * num_heads_v * (HEAD_DIM // value_tile)
+    )
+    kernel(
+        q,
+        k,
+        v,
+        g_cumsum,
+        beta,
+        A,
+        raw_qk,
+        state,
+        output,
+        chunk_start,
+        chunk_length,
+        total_blocks,
+    )
+
+
+# q/k: [B, T, Hq, 128] BF16
+# v: [B, T, Hv, 128] BF16
+# g_cumsum/beta: [B, T, Hv] FP32
+# A: [B, T, Hv, 64] BF16
+# initial_state/final_state: [B, Hv, 128, 128] FP32
+def gdn_prefill_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    initial_state: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch_size, num_tokens, num_heads_qk, head_dim = q.shape
+    if k.shape != q.shape or k.dtype != q.dtype:
+        raise ValueError("q and k must have the same shape and dtype")
+    if head_dim != HEAD_DIM:
+        raise ValueError(f"expected head dimension {HEAD_DIM}, got {head_dim}")
+    if v.shape[:2] != (batch_size, num_tokens) or v.shape[3] != HEAD_DIM:
+        raise ValueError("v must have shape [B, T, Hv, 128]")
+    num_heads_v = v.shape[2]
+    if num_heads_v % num_heads_qk != 0:
+        raise ValueError("Hv must be divisible by Hq")
+    if g_cumsum.shape != (batch_size, num_tokens, num_heads_v):
+        raise ValueError("g_cumsum has an invalid shape")
+    if beta.shape != g_cumsum.shape:
+        raise ValueError("beta must have the same shape as g_cumsum")
+    if A.shape != (batch_size, num_tokens, num_heads_v, CHUNK_SIZE):
+        raise ValueError("A must have shape [B, T, Hv, 64]")
+
+    state_shape = (batch_size, num_heads_v, HEAD_DIM, HEAD_DIM)
+    if initial_state is None:
+        state = torch.zeros(state_shape, dtype=torch.float32, device=q.device)
+    else:
+        if initial_state.shape != state_shape or initial_state.dtype != torch.float32:
+            raise ValueError("initial_state must be FP32 with shape [B, Hv, 128, 128]")
+        state = initial_state.clone()
+
+    output = torch.empty(
+        (batch_size, num_tokens, num_heads_v, HEAD_DIM),
+        dtype=q.dtype,
+        device=q.device,
+    )
+
+    if batch_size == 1 and num_heads_qk == 2 and num_heads_v == 8:
+        for chunk_start in range(0, num_tokens, CHUNK_SIZE):
+            chunk_length = min(CHUNK_SIZE, num_tokens - chunk_start)
+            residual = compute_residual(
+                k,
+                v,
+                g_cumsum,
+                state,
+                chunk_start,
+                chunk_length,
+            )
+            V_new = apply_ab(
+                residual,
+                beta,
+                A,
+                chunk_start,
+                chunk_length,
+            )
+            scores = compute_scores(
+                q,
+                k,
+                g_cumsum,
+                chunk_start,
+                chunk_length,
+            )
+            compute_output(
+                q,
+                g_cumsum,
+                scores,
+                V_new,
+                state,
+                chunk_start,
+                chunk_length,
+                output,
+            )
+            update_state(
+                k,
+                g_cumsum,
+                V_new,
+                state,
+                chunk_start,
+                chunk_length,
+            )
+        return output, state
+
+    raw_qk = compute_raw_qk(q, k)
+
+    for chunk_start in range(0, num_tokens, CHUNK_SIZE):
+        chunk_length = min(CHUNK_SIZE, num_tokens - chunk_start)
+        fused_chunk(
+            q,
+            k,
+            v,
+            g_cumsum,
+            beta,
+            A,
+            raw_qk,
+            state,
+            output,
+            chunk_start,
+            chunk_length,
+        )
+
+    return output, state

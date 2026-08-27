@@ -1,0 +1,6 @@
+case,correctness,median_ms
+2026-07-24 08:57:03  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_raw_qk` with `out_idx=None`
+2026-07-24 08:57:08  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_raw_qk`
+2026-07-24 08:57:08  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:133): TileLang begins to compile kernel `gdn_persistent_pingpong` with `out_idx=None`
+2026-07-24 08:57:32  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:141): TileLang completes to compile kernel `gdn_persistent_pingpong`
+deep_gva_state,PASS,283.855118
