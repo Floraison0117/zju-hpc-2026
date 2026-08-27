@@ -861,3 +861,17 @@ cd ~/lab4-gpu && ./compile.sh
 **90 分可达性定论（round-5 终审）**：真实 OJ 536.760s/85.20 分（A381）。90 分需 ≤461s（差 -76s）。RHS 369s 的算法级重构（z-rolling/split/recompute/DAG）全部 L0 死路——**register floor ≈254-255 regs 是 BSSN 公式固有（fdderivs 61-fh + Ricci 33+ 变量 + 组装瞬时值），任何 smem/split/recompute/重排均无法突破**。残余杠杆仅 tap-sharing（-10~25s → ~512-527s/86-87 分，仍差 90 分）。**结论：90 分在物理/诚信边界内不可达；85.2 分为当前实际极限**。部署态维持 A381（536.760s/85.20 分）。主 agent 决策：接受 85.2 分 or 续做 tap-sharing 至 ~87 分 or 停止。
 
 **证据**：`~/lab4-gpu-cand-r5-zroll-20260827-110726/evidence/r5-l0/`（ptxas-base/cand/ablate 全套 + job1-5.log）。
+
+## 迭代42 R5 tap-sharing 前提验证（ncu）：**前提成立（L2 仍 82.43% SOL 瓶颈）**
+
+**背景**：RHS 重构族（#1 z-rolling / #2 split / #3 Ricci recompute / #4 DAG）L0 全死（iter39-41）后，任务指定 fallback = analysis tap-sharing（`a38_tapsharing_design.md`，预期 -10~25s）。设计文档标注第一前提："A38-1 fused-z 后未重新 ncu，若 global load 不再是主导，tap-sharing 收益打折（需先 ncu 确认新瓶颈仍 L2）"。
+
+**ncu（job 178262，部署态 A381，`--clock-control none` 修 MIG 锁频，`-k regex:global_interp_multi --launch-skip 5 --launch-count 2`）**：global_interp_multi_kernel（MassPAng 大 launch，grid 144×17，NN=36,864，46.22ms/launch）：
+- **L2 Cache Throughput = 82.43%**（与 iter38.1 的 91% 同量级，fused-z 后仍饱和）
+- **Memory Throughput = 82.43%**、DRAM = 14.82%、Compute(SM) = 30.02%
+- SOL Bottleneck = **"L2"**（ncu 明示 "This workload is utilizing >80% ... Start by analyzing L2"）
+- Local Memory Spilling = 0（A38-1 fused-z 已消 ya[216] 栈流量，local 不再贡献）
+- L2 Sector Promotion Misses = 25.50%
+- **结论：tap-sharing 前提成立**——MassPAng 的 global load（216/(point,var)）仍是 L2 wavefront 压力主源，4.7× global load 削减的机制未失效。
+
+**裁决**：tap-sharing 设计可行且前提已证；但工程量 2-4h + 4 项中等风险（tile 几何正确性 / union 窗口边界 / 反射语义 / [L2 前提现已排除]），且收益 -10~25s → ~512-527s / 86-87 分，**仍不足 90 分（461s）**。**本轮未实现**（RHS 主战场 L0 已定论，剩余时间盒不足以完成 tap-sharing 全流程 L1+L2）。证据 `~/lab4-gpu/evidence/r5-tapshare-ncu2/metrics.csv`。

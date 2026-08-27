@@ -127,3 +127,16 @@
   - **#2 split / #4 DAG**：分析判死（任何含 Ricci 的 kernel 持有 36 几何层 + 组装瞬时 ≈105 doubles 不可压；消融证据 254 regs）。
   - **结论：90 分（≤461s）在物理/诚信边界内不可达；85.2 分为实际极限**。部署态维持 A381（536.760s/85.20 分）。
   - **fallback tap-sharing（-10~25s → ~87 分）**：设计已存 `a38_tapsharing_design.md`，本轮未实现（A38-1 fused-z 后 analysis 新瓶颈未重测 ncu，前提待验证；建议主 agent 决定是否续做）。
+
+## 第 5 轮最终结论（2026-08-27 11:45）✅ 全部 L0 证据闭环
+
+- **RHS 算法级重构 L0 判定**（`~/lab4-gpu-cand-r5-zroll-20260827-110726/evidence/r5-l0/`，11 个 ptxas log + job1-5.log）：
+  | 候选 | L0 结果 | 判定 |
+  |---|---|---|
+  | #1 z-rolling（R3） | natural 255 不变、lb2 spill 2124→2036B（-4.1%）、+34.8KB smem | **死路**（milestone-B 49-double floor 假说证伪） |
+  | #2 2-way/3-way split | 分析判死（任何 Ricci kernel ≥105 doubles；旧 split v2/Lever A 同构） | 死路 |
+  | #3 Ricci recompute | 消融诊断：whole monster 删除后 natural 仅 255→254、lb2 spill -17.5% 上限 → 峰值在 fdderivs 61-fh | 死路 |
+  | #4 DAG 重排 | 与 #1/#3 同构（live set 固有 254 regs） | 死路 |
+  | #5 tap-sharing fallback | **前提已验证成立**（ncu：L2 82.43% SOL，job 178262） | 待实现（-10~25s → ~87 分） |
+- **90 分可达性定论**：90 分（≤461s）需 -76s，RHS 369s 的算法级重构全族 L0 死路（register floor 254-255 regs 是 BSSN 公式固有）。tap-sharing -10~25s 只能到 ~87 分。**85.2 分（A381，536.760s）为当前实际极限**。
+- **部署状态**：formal 未动（8 文件 hash 与 A381 一致），Input 已还原（Final=100/Analysis=0.1），无部署候选。
