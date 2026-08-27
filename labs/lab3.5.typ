@@ -1,5 +1,4 @@
 #import "@preview/cuti:0.2.1": show-cn-fakebold
-#import "@preview/cetz:0.3.2"
 
 #show: show-cn-fakebold
 #set text(font: ("Palatino Linotype", "KaiTi"))
@@ -234,56 +233,50 @@ MTE2 1.51 us，MTE3 约 0.26 us。
 对齐批量路径（$H % 16 == 0$ 且 $H <= 4096$）的最终数据流：
 
 #figure(
-  cetz.canvas({
-    import cetz.draw: *
-    let fillb = rgb("#eef2f7")
-    let strokeb = 0.6pt + rgb("#44506b")
-    // 数据盒子: 两个对角点
-    let box2(c1, c2, label) = {
-      rect(c1, c2, fill: fillb, stroke: strokeb)
-      content(((c1.at(0) + c2.at(0)) / 2, (c1.at(1) + c2.at(1)) / 2), label)
-    }
-    // 主线（y=4.6）
-    box2((0.4, 4.1), (2.3, 5.1), [GM: x, residual])
-    box2((3.6, 4.1), (5.9, 5.1), [inBuf (FP16, x|res)])
-    box2((7.3, 4.1), (9.7, 5.1), [R32 (FP32, UB)])
-    box2((11.0, 4.1), (13.1, 5.1), [y32 (FP32)])
-    box2((14.1, 4.1), (15.4, 5.1), [y (FP16)])
-    // 主线箭头与操作
-    line((2.3, 4.6), (3.6, 4.6), marker: (end: ">"))
-    content((2.95, 4.95), text(size: 8pt, [MTE2 多块 DataCopy]))
-    line((5.9, 4.6), (7.3, 4.6), marker: (end: ">"))
-    content((6.6, 4.95), text(size: 8pt, [Cast x32, res32; Add]))
-    line((9.7, 4.6), (11.0, 4.6), marker: (end: ">"))
-    content((10.35, 4.95), text(size: 8pt, [Muls(rstd); Mul(weight)]))
-    line((13.1, 4.6), (14.1, 4.6), marker: (end: ">"))
-    content((13.6, 4.95), text(size: 8pt, [Cast]))
-    line((15.4, 4.6), (16.5, 4.6), marker: (end: ">"))
-    content((16.0, 4.95), text(size: 8pt, [GM y]))
-    // 底部: residual_out 分支
-    line((8.4, 4.1), (5.6, 2.6), marker: (end: ">"))
-    content((7.4, 3.1), text(size: 8pt, [Cast]))
-    box2((3.8, 1.6), (6.0, 2.5), [residual_out (FP16)])
-    line((6.0, 2.05), (7.3, 2.05), marker: (end: ">"))
-    content((6.65, 2.35), text(size: 8pt, [MTE3 多块 DataCopy]))
-    box2((7.3, 1.6), (9.2, 2.5), [GM residual_out])
-    // 底部: 规约与 rstd 分支
-    line((8.6, 4.1), (10.6, 2.6), marker: (end: ">"))
-    content((9.2, 3.1), text(size: 8pt, [Mul]))
-    box2((9.9, 1.6), (11.6, 2.5), [sq = $R^2$])
-    line((11.6, 2.05), (12.6, 2.05), marker: (end: ">"))
-    content((12.1, 2.35), text(size: 8pt, [Block/WholeReduceSum]))
-    box2((12.6, 1.6), (14.0, 2.5), [sumSqArr])
-    line((14.0, 2.05), (15.0, 2.05), marker: (end: ">"))
-    content((14.5, 2.35), text(size: 8pt, [V→S 同步]))
-    box2((15.0, 1.6), (16.6, 2.5), [标量 rstd])
-    // rstd 反馈到 Muls
-    line((15.8, 2.6), (12.2, 4.1), marker: (end: ">"))
-    content((14.6, 3.1), text(size: 8pt, [rstd]))
-  }),
-  caption: [V13 对齐批量路径数据流（虚线为同步点所在，见正文同步设计）],
+  align(center,
+    box(
+      width: 100%,
+      height: 205pt,
+      {
+        let y1 = 32pt     // 上行盒子中心
+        let y2 = 152pt    // 下行盒子中心
+        let bh = 30pt     // 盒子高
+        let boxat(cx, cy, w, label) = place(
+          dx: cx - w / 2, dy: cy - bh / 2,
+          box(width: w, height: bh, fill: rgb("#eef2f7"), stroke: 0.6pt + rgb("#44506b"),
+              align(center + horizon, text(size: 8pt, label))))
+        let arrow(x1, y1p, x2, y2p, lab) = {
+          place(dx: 0pt, dy: 0pt, curve(stroke: 0.7pt + black,
+            curve.move((x1, y1p)), curve.line((x2, y2p))))
+          place(dx: (x1 + x2) / 2 - 24pt, dy: (y1p + y2p) / 2 - 7pt, text(size: 6pt, lab))
+        }
+        // 上行主线（T1→T4）
+        boxat(40pt, y1, 58pt, [GM x/res])
+        boxat(148pt, y1, 58pt, [inBuf (FP16)])
+        boxat(258pt, y1, 58pt, [R32 (FP32)])
+        boxat(398pt, y1, 78pt, [y → GM y])
+        arrow(69pt, y1, 119pt, y1, [MTE2 多块 DataCopy])
+        arrow(177pt, y1, 229pt, y1, [Cast x32, res32; Add])
+        arrow(287pt, y1, 359pt, y1, [Muls(rstd); Mul(weight); Cast])
+        // 下行左支: residual_out
+        arrow(280pt, y1 + 15pt, 86pt, y2 - 15pt, [Cast])
+        boxat(70pt, y2, 62pt, [residual_out (FP16)])
+        boxat(190pt, y2, 64pt, [GM residual_out])
+        arrow(101pt, y2, 158pt, y2, [MTE3 多块 DataCopy])
+        // 下行右支: 规约与 rstd
+        arrow(270pt, y1 + 15pt, 306pt, y2 - 15pt, [Mul])
+        boxat(330pt, y2, 56pt, [sq = $R^2$])
+        boxat(400pt, y2, 54pt, [sumSqArr])
+        arrow(358pt, y2, 373pt, y2, [Block/WholeReduceSum])
+        arrow(427pt, y2, 442pt, y2, [V→S 同步])
+        boxat(464pt, y2, 58pt, [标量 rstd])
+        // rstd 反馈到 Muls（T3→T4 箭头中部）
+        arrow(478pt, y2 - 15pt, 326pt, y1 + 15pt, [rstd])
+      },
+    ),
+  ),
+  caption: [V13 对齐批量路径数据流（同步点见正文同步设计）],
 )
-
 
 同步设计：weight 拷贝首条发出 + 紧邻 Set/Wait(MTE2_V) + Cast（不在 phase A 关键
 路径上）；chunk 数据拷贝后 Set/Wait(MTE2_V)；规约后一次 V→S；输出前紧邻
