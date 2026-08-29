@@ -392,6 +392,70 @@ __device__ __forceinline__ void d_polin3_1b(
 // immediately. Bit-exact: per-tap formula (direct vs 1-idx reflection per dim,
 // factor order SoA[0], SoA[1], SoA[2]) and polint consumption order replicate
 // d_decide3d + d_polin3_1b exactly. sommerfeld keeps the original pair.
+
+// Fixed-node six-point tensor-product interpolation for global interpolation.
+// The old path calls the general Neville routine 43 times per output point,
+// carrying four local work arrays.  Here the nodes are always 0..5, so the
+// same degree-5 polynomial is evaluated with precomputed Lagrange weights.
+// Reflection/index mapping and tap/factor order remain x -> y -> z.
+__device__ __forceinline__ void d_gi_lagrange6(
+    const int ex[3], const double* f, const int cxB[3], const int cxT[3],
+    const double SoA[3], const double cx[3], int ordn, double& y, double& dy
+) {
+    (void)cxT;
+    (void)ordn;
+    double wx[6], wy[6], wz[6];
+    const double x = cx[0];
+    wx[0] = -((x - 1.0) * (x - 2.0) * (x - 3.0) * (x - 4.0) * (x - 5.0)) / 120.0;
+    wx[1] =  ( x        * (x - 2.0) * (x - 3.0) * (x - 4.0) * (x - 5.0)) /  24.0;
+    wx[2] = -(x        * (x - 1.0) * (x - 3.0) * (x - 4.0) * (x - 5.0)) /  12.0;
+    wx[3] =  ( x        * (x - 1.0) * (x - 2.0) * (x - 4.0) * (x - 5.0)) /  12.0;
+    wx[4] = -(x        * (x - 1.0) * (x - 2.0) * (x - 3.0) * (x - 5.0)) /  24.0;
+    wx[5] =  ( x        * (x - 1.0) * (x - 2.0) * (x - 3.0) * (x - 4.0)) / 120.0;
+    const double yy = cx[1];
+    wy[0] = -((yy - 1.0) * (yy - 2.0) * (yy - 3.0) * (yy - 4.0) * (yy - 5.0)) / 120.0;
+    wy[1] =  ( yy        * (yy - 2.0) * (yy - 3.0) * (yy - 4.0) * (yy - 5.0)) /  24.0;
+    wy[2] = -(yy        * (yy - 1.0) * (yy - 3.0) * (yy - 4.0) * (yy - 5.0)) /  12.0;
+    wy[3] =  ( yy        * (yy - 1.0) * (yy - 2.0) * (yy - 4.0) * (yy - 5.0)) /  12.0;
+    wy[4] = -(yy        * (yy - 1.0) * (yy - 2.0) * (yy - 3.0) * (yy - 5.0)) /  24.0;
+    wy[5] =  ( yy        * (yy - 1.0) * (yy - 2.0) * (yy - 3.0) * (yy - 4.0)) / 120.0;
+    const double z = cx[2];
+    wz[0] = -((z - 1.0) * (z - 2.0) * (z - 3.0) * (z - 4.0) * (z - 5.0)) / 120.0;
+    wz[1] =  ( z        * (z - 2.0) * (z - 3.0) * (z - 4.0) * (z - 5.0)) /  24.0;
+    wz[2] = -(z        * (z - 1.0) * (z - 3.0) * (z - 4.0) * (z - 5.0)) /  12.0;
+    wz[3] =  ( z        * (z - 1.0) * (z - 2.0) * (z - 4.0) * (z - 5.0)) /  12.0;
+    wz[4] = -(z        * (z - 1.0) * (z - 2.0) * (z - 3.0) * (z - 5.0)) /  24.0;
+    wz[5] =  ( z        * (z - 1.0) * (z - 2.0) * (z - 3.0) * (z - 4.0)) / 120.0;
+
+    double result = 0.0;
+    for (int i = 0; i < 6; ++i) {
+        const int ia = cxB[0] + i;
+        const int ii = (ia <= 0) ? 1 - ia : ia;
+        const double fi = (ia <= 0) ? SoA[0] : 1.0;
+        double ysum = 0.0;
+        for (int j = 0; j < 6; ++j) {
+            const int ja = cxB[1] + j;
+            const int jj = (ja <= 0) ? 1 - ja : ja;
+            const double fj = (ja <= 0) ? SoA[1] : 1.0;
+            double zsum = 0.0;
+            for (int k = 0; k < 6; ++k) {
+                const int ka = cxB[2] + k;
+                const int kk = (ka <= 0) ? 1 - ka : ka;
+                const double fk = (ka <= 0) ? SoA[2] : 1.0;
+                double tap = f_at_1b(f, ex, ii, jj, kk);
+                if (ia <= 0) tap *= fi;
+                if (ja <= 0) tap *= fj;
+                if (ka <= 0) tap *= fk;
+                zsum += wz[k] * tap;
+            }
+            ysum += wy[j] * zsum;
+        }
+        result += wx[i] * ysum;
+    }
+    y = result;
+    dy = 0.0;
+}
+
 __device__ __forceinline__ void d_gi_fused(
 	const int ex[3], const double* f, const int cxB[3], const int cxT[3],
 	const double SoA[3], const double cx[3], const double x1a[MAX_ORDN],
@@ -516,6 +580,19 @@ void gpu_lowerboundset_launch(
     cudaStream_t &stream,
     int ex[3],
     double* d_chi0, double TINNY
+);
+
+void gpu_pack_multi_launch(
+    cudaStream_t stream,
+    const double* const* d_src_arr, double* const* d_dst_arr, int num_var,
+    int src_nx, int src_ny, int dst_nx, int dst_ny, int dst_nz,
+    int off_x, int off_y, int off_z
+);
+void gpu_unpack_multi_launch(
+    cudaStream_t stream,
+    const double* const* d_src_arr, double* const* d_dst_arr, int num_var,
+    int dst_nx, int dst_ny, int src_nx, int src_ny, int src_nz,
+    int off_x, int off_y, int off_z
 );
 
 void gpu_pack_launch(

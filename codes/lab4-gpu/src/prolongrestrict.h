@@ -81,6 +81,26 @@ void gpu_prolong3_launch(
     const double* SoA, int Symmetry, int skip_interior
 );
 
+void gpu_prolong3_multi_var_launch(
+    cudaStream_t stream,
+    const double* const* d_src_c_arr, double* const* d_dst_f_arr,
+    int num_var, const double* d_SoA_all,
+    const double* llbc, const double* uubc, const int* extc,
+    const double* llbf, const double* uubf, const int* extf,
+    const double* llbt, const double* uubt,
+    int Symmetry, int skip_interior
+);
+
+void gpu_prolong3_multi_var_launch_int(
+    cudaStream_t stream,
+    const double* const* d_src_c_arr, double* const* d_dst_f_arr,
+    int num_var, const double* d_SoA_all,
+    const double* llbc, const double* uubc, const int* extc,
+    const double* llbf, const double* uubf, const int* extf,
+    const double* llbt, const double* uubt,
+    int Symmetry, int skip_interior
+);
+
 void gpu_prolong3_launch_int(
     cudaStream_t stream,
     const double* d_src_c, double* d_dst_f,
@@ -88,6 +108,16 @@ void gpu_prolong3_launch_int(
     const double* llbf, const double* uubf, const int* extf,
     const double* llbt, const double* uubt,
     const double* SoA, int Symmetry, int skip_interior
+);
+
+void gpu_restrict3_multi_var_launch(
+    cudaStream_t stream,
+    const double* const* d_src_f_arr, double* const* d_dst_c_arr,
+    int num_var, const double* d_SoA_all,
+    const double* llbc, const double* uubc, const int* extc,
+    const double* llbf, const double* uubf, const int* extf,
+    const double* llbt, const double* uubt,
+    int Symmetry
 );
 
 void gpu_restrict3_launch(

@@ -58,7 +58,11 @@ __device__ void global_interp_device(
 	cx[2] = (cxB[2] > 0) ? (z1 - X_at_1b(Z, cxB[2])) / dZ : (z1 + X_at_1b(Z, 1 - cxB[2])) / dZ;
 
 	double ddy = 0.0;
-	d_gi_fused(ex, f, cxB, cxT, SoA, cx, x1a, ORDN, f_int[0], ddy);
+	if (ORDN == 6) {
+		d_gi_lagrange6(ex, f, cxB, cxT, SoA, cx, ORDN, f_int[0], ddy);
+	} else {
+		d_gi_fused(ex, f, cxB, cxT, SoA, cx, x1a, ORDN, f_int[0], ddy);
+	}
 }
 
 __global__ void lowerboundset_kernel(int n, double* chi0, double TINNY) {
@@ -101,6 +105,47 @@ __global__ void gpu_pack_kernel(
     dst_1d[idx] = src_3d[src_idx];
 }
 
+
+__global__ void gpu_pack_multi_kernel(
+    const double* const* __restrict__ d_src_arr,
+    double* const* __restrict__ d_dst_arr,
+    int num_var,
+    int src_nx, int src_ny, int dst_nx, int dst_ny, int dst_nz,
+    int off_x, int off_y, int off_z
+) {
+    int var_idx = blockIdx.y;
+    if (var_idx >= num_var) return;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = dst_nx * dst_ny * dst_nz;
+    if (idx >= total) return;
+    int i = idx % dst_nx;
+    int j = (idx / dst_nx) % dst_ny;
+    int k = idx / (dst_nx * dst_ny);
+    int src_idx = (k + off_z) * (src_nx * src_ny) +
+                  (j + off_y) * src_nx + (i + off_x);
+    d_dst_arr[var_idx][idx] = d_src_arr[var_idx][src_idx];
+}
+
+__global__ void gpu_unpack_multi_kernel(
+    const double* const* __restrict__ d_src_arr,
+    double* const* __restrict__ d_dst_arr,
+    int num_var,
+    int dst_nx, int dst_ny, int src_nx, int src_ny, int src_nz,
+    int off_x, int off_y, int off_z
+) {
+    int var_idx = blockIdx.y;
+    if (var_idx >= num_var) return;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = src_nx * src_ny * src_nz;
+    if (idx >= total) return;
+    int i = idx % src_nx;
+    int j = (idx / src_nx) % src_ny;
+    int k = idx / (src_nx * src_ny);
+    int dst_idx = (k + off_z) * (dst_nx * dst_ny) +
+                  (j + off_y) * dst_nx + (i + off_x);
+    d_dst_arr[var_idx][dst_idx] = d_src_arr[var_idx][idx];
+}
+
 __global__ void gpu_unpack_kernel(
     const double* __restrict__ src_1d, double* __restrict__ dst_3d,
     int dst_nx, int dst_ny, 
@@ -117,6 +162,41 @@ __global__ void gpu_unpack_kernel(
     
     int dst_idx = (k + off_z) * (dst_nx * dst_ny) + (j + off_y) * dst_nx + (i + off_x);
     dst_3d[dst_idx] = src_1d[idx];
+}
+
+
+void gpu_pack_multi_launch(
+    cudaStream_t stream,
+    const double* const* d_src_arr, double* const* d_dst_arr, int num_var,
+    int src_nx, int src_ny, int dst_nx, int dst_ny, int dst_nz,
+    int off_x, int off_y, int off_z
+) {
+    if (num_var <= 0) return;
+    int n = dst_nx * dst_ny * dst_nz;
+    int block = 256;
+    int grid = (n + block - 1) / block;
+    gpu_pack_multi_kernel<<<dim3(grid, num_var), block, 0, stream>>>(
+        d_src_arr, d_dst_arr, num_var,
+        src_nx, src_ny, dst_nx, dst_ny, dst_nz,
+        off_x, off_y, off_z
+    );
+}
+
+void gpu_unpack_multi_launch(
+    cudaStream_t stream,
+    const double* const* d_src_arr, double* const* d_dst_arr, int num_var,
+    int dst_nx, int dst_ny, int src_nx, int src_ny, int src_nz,
+    int off_x, int off_y, int off_z
+) {
+    if (num_var <= 0) return;
+    int n = src_nx * src_ny * src_nz;
+    int block = 256;
+    int grid = (n + block - 1) / block;
+    gpu_unpack_multi_kernel<<<dim3(grid, num_var), block, 0, stream>>>(
+        d_src_arr, d_dst_arr, num_var,
+        dst_nx, dst_ny, src_nx, src_ny, src_nz,
+        off_x, off_y, off_z
+    );
 }
 
 void gpu_pack_launch(

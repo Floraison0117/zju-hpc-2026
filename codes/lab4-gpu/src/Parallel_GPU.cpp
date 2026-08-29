@@ -44,6 +44,9 @@ int Parallel::gpu_data_packer(
     }
 
     int type; /* 1 copy, 2 restrict, 3 prolong */
+    std::vector<const double**> free_src_arrays;
+    std::vector<double**> free_dst_arrays;
+    std::vector<double*> free_soa_arrays;
     if (src->data->Bg->lev == dst->data->Bg->lev) type = 1;
     else if (src->data->Bg->lev > dst->data->Bg->lev) type = 2;
     else type = 3;
@@ -53,100 +56,236 @@ int Parallel::gpu_data_packer(
             (dir == PACK && dst->data->Bg->rank == rank_in && src->data->Bg->rank == myrank) ||
             (dir == UNPACK && src->data->Bg->rank == rank_in && dst->data->Bg->rank == myrank)
         ) {
-            varls = VarLists;
-            varld = VarListd;
-            while (varls && varld) {
-                if (d_data) {
-                    if (dir == PACK) {
-                        double* d_dst_ptr = d_data + size_out; 
-                        double* d_src_ptr = src->data->Bg->d_fgfs[varls->data->sgfn];
-
-                        switch (type) {
-                        case 1: {
-                            double dx = (src->data->Bg->bbox[3] - src->data->Bg->bbox[0]) / src->data->Bg->shape[0];
-                            double dy = (src->data->Bg->bbox[4] - src->data->Bg->bbox[1]) / src->data->Bg->shape[1];
-                            double dz = (src->data->Bg->bbox[5] - src->data->Bg->bbox[2]) / src->data->Bg->shape[2];
-
-                            // 计算幽灵区在源大网格中的 0-based 起始索引偏移 (使用 std::trunc 对齐 Fortran 的 idint)
-                            int off_x = (int)std::trunc((dst->data->llb[0] - src->data->Bg->bbox[0]) / dx + 0.4);
-                            int off_y = (int)std::trunc((dst->data->llb[1] - src->data->Bg->bbox[1]) / dy + 0.4);
-                            int off_z = (int)std::trunc((dst->data->llb[2] - src->data->Bg->bbox[2]) / dz + 0.4);
-
-                            gpu_pack_launch(
-                                src->data->Bg->stream, 
-                                d_src_ptr, d_dst_ptr,
-                                src->data->Bg->shape[0], src->data->Bg->shape[1], // 源 3D 数组的 XY 维度
-                                dst->data->shape[0], dst->data->shape[1], dst->data->shape[2], // 目标幽灵区的大小
-                                off_x, off_y, off_z
-                            );
-                            break;
-                        }
-
-                        case 2: {
-                            gpu_restrict3_launch(
-                                src->data->Bg->stream,
-                                d_src_ptr, d_dst_ptr, // src_f, dst_c
-                                dst->data->llb, dst->data->uub, dst->data->shape,        
-                                src->data->Bg->bbox, src->data->Bg->bbox + dim, src->data->Bg->shape, 
-                                dst->data->llb, dst->data->uub, 
-                                varls->data->SoA, Symmetry
-                            );
-                            break;
-                        }
-
-                        case 3: {
-                            gpu_prolong3_launch(
-                                src->data->Bg->stream,
-                                d_src_ptr, d_dst_ptr, // src_c, dst_f
-                                src->data->Bg->bbox, src->data->Bg->bbox + dim, src->data->Bg->shape, 
-                                dst->data->llb, dst->data->uub, dst->data->shape,        
-                                dst->data->llb, dst->data->uub, 
-                                varls->data->SoA, Symmetry, 1
-                            );
-                            gpu_prolong3_launch_int(
-                                src->data->Bg->stream,
-                                d_src_ptr, d_dst_ptr, // src_c, dst_f
-                                src->data->Bg->bbox, src->data->Bg->bbox + dim, src->data->Bg->shape, 
-                                dst->data->llb, dst->data->uub, dst->data->shape,        
-                                dst->data->llb, dst->data->uub, 
-                                varls->data->SoA, Symmetry, 0
-                            );
-                            break;
-                        }
-                        }
-                    }
-                    
-                    if (dir == UNPACK) {
-                        double* d_src_ptr = d_data + size_out;
-                        double* d_dst_ptr = dst->data->Bg->d_fgfs[varld->data->sgfn];
-
-                        double dx = (dst->data->Bg->bbox[3] - dst->data->Bg->bbox[0]) / dst->data->Bg->shape[0];
-                        double dy = (dst->data->Bg->bbox[4] - dst->data->Bg->bbox[1]) / dst->data->Bg->shape[1];
-                        double dz = (dst->data->Bg->bbox[5] - dst->data->Bg->bbox[2]) / dst->data->Bg->shape[2];
-
-                        // 计算收到的一维幽灵区数据在目标大网格中的 0-based 写入起始索引
-                        int off_x = (int)std::trunc((dst->data->llb[0] - dst->data->Bg->bbox[0]) / dx + 0.4);
-                        int off_y = (int)std::trunc((dst->data->llb[1] - dst->data->Bg->bbox[1]) / dy + 0.4);
-                        int off_z = (int)std::trunc((dst->data->llb[2] - dst->data->Bg->bbox[2]) / dz + 0.4);
-
-                        gpu_unpack_launch(
-                            dst->data->Bg->stream, 
-                            d_src_ptr, d_dst_ptr,
-                            dst->data->Bg->shape[0], dst->data->Bg->shape[1], // 目标 3D 数组的 XY 维度
-                            dst->data->shape[0], dst->data->shape[1], dst->data->shape[2], // 收到幽灵区数据的大小
-                            off_x, off_y, off_z
-                        );
-                    }
+            if (d_data && dir == PACK && type == 3) {
+                std::vector<const double*> h_src;
+                std::vector<double*> h_dst;
+                std::vector<double> h_soa;
+                int elem = dst->data->shape[0] * dst->data->shape[1] * dst->data->shape[2];
+                varls = VarLists;
+                varld = VarListd;
+                while (varls && varld) {
+                    h_src.push_back(src->data->Bg->d_fgfs[varls->data->sgfn]);
+                    h_dst.push_back(d_data + size_out);
+                    h_soa.push_back(varls->data->SoA[0]);
+                    h_soa.push_back(varls->data->SoA[1]);
+                    h_soa.push_back(varls->data->SoA[2]);
+                    size_out += elem;
+                    varls = varls->next;
+                    varld = varld->next;
                 }
-                size_out += dst->data->shape[0] * dst->data->shape[1] * dst->data->shape[2];
-                varls = varls->next;
-                varld = varld->next;
+                if (!h_src.empty()) {
+                    const double** d_src_arr = nullptr;
+                    double** d_dst_arr = nullptr;
+                    double* d_soa = nullptr;
+                    size_t nvar = h_src.size();
+                    cudaMalloc((void**)&d_src_arr, nvar * sizeof(const double*));
+                    cudaMalloc((void**)&d_dst_arr, nvar * sizeof(double*));
+                    cudaMalloc((void**)&d_soa, h_soa.size() * sizeof(double));
+                    cudaMemcpyAsync(d_src_arr, h_src.data(), nvar * sizeof(const double*),
+                                    cudaMemcpyHostToDevice, src->data->Bg->stream);
+                    cudaMemcpyAsync(d_dst_arr, h_dst.data(), nvar * sizeof(double*),
+                                    cudaMemcpyHostToDevice, src->data->Bg->stream);
+                    cudaMemcpyAsync(d_soa, h_soa.data(), h_soa.size() * sizeof(double),
+                                    cudaMemcpyHostToDevice, src->data->Bg->stream);
+                    gpu_prolong3_multi_var_launch(
+                        src->data->Bg->stream, d_src_arr, d_dst_arr, (int)nvar, d_soa,
+                        src->data->Bg->bbox, src->data->Bg->bbox + dim, src->data->Bg->shape,
+                        dst->data->llb, dst->data->uub, dst->data->shape,
+                        dst->data->llb, dst->data->uub, Symmetry, 1);
+                    gpu_prolong3_multi_var_launch_int(
+                        src->data->Bg->stream, d_src_arr, d_dst_arr, (int)nvar, d_soa,
+                        src->data->Bg->bbox, src->data->Bg->bbox + dim, src->data->Bg->shape,
+                        dst->data->llb, dst->data->uub, dst->data->shape,
+                        dst->data->llb, dst->data->uub, Symmetry, 0);
+                    free_src_arrays.push_back(d_src_arr);
+                    free_dst_arrays.push_back(d_dst_arr);
+                    free_soa_arrays.push_back(d_soa);
+                }
+            } else {
+                varls = VarLists;
+                varld = VarListd;
+                while (varls && varld) {
+                    if (d_data) {
+                        if (dir == PACK) {
+                            double* d_dst_ptr = d_data + size_out; 
+                            double* d_src_ptr = src->data->Bg->d_fgfs[varls->data->sgfn];
+
+                            switch (type) {
+                            case 1: {
+                                double dx = (src->data->Bg->bbox[3] - src->data->Bg->bbox[0]) / src->data->Bg->shape[0];
+                                double dy = (src->data->Bg->bbox[4] - src->data->Bg->bbox[1]) / src->data->Bg->shape[1];
+                                double dz = (src->data->Bg->bbox[5] - src->data->Bg->bbox[2]) / src->data->Bg->shape[2];
+
+                                // 计算幽灵区在源大网格中的 0-based 起始索引偏移 (使用 std::trunc 对齐 Fortran 的 idint)
+                                int off_x = (int)std::trunc((dst->data->llb[0] - src->data->Bg->bbox[0]) / dx + 0.4);
+                                int off_y = (int)std::trunc((dst->data->llb[1] - src->data->Bg->bbox[1]) / dy + 0.4);
+                                int off_z = (int)std::trunc((dst->data->llb[2] - src->data->Bg->bbox[2]) / dz + 0.4);
+
+                                if (varls == VarLists) {
+                                    std::vector<const double*> h_src;
+                                    std::vector<double*> h_dst;
+                                    MyList<var> *batch_s = VarLists;
+                                    MyList<var> *batch_d = VarListd;
+                                    int elem = dst->data->shape[0] * dst->data->shape[1] * dst->data->shape[2];
+                                    int batch_offset = size_out;
+                                    while (batch_s && batch_d) {
+                                        h_src.push_back(src->data->Bg->d_fgfs[batch_s->data->sgfn]);
+                                        h_dst.push_back(d_data + batch_offset);
+                                        batch_offset += elem;
+                                        batch_s = batch_s->next;
+                                        batch_d = batch_d->next;
+                                    }
+                                    const double** d_src_arr = nullptr;
+                                    double** d_dst_arr = nullptr;
+                                    size_t nvar = h_src.size();
+                                    cudaMalloc((void**)&d_src_arr, nvar * sizeof(const double*));
+                                    cudaMalloc((void**)&d_dst_arr, nvar * sizeof(double*));
+                                    cudaMemcpyAsync(d_src_arr, h_src.data(), nvar * sizeof(const double*),
+                                                    cudaMemcpyHostToDevice, src->data->Bg->stream);
+                                    cudaMemcpyAsync(d_dst_arr, h_dst.data(), nvar * sizeof(double*),
+                                                    cudaMemcpyHostToDevice, src->data->Bg->stream);
+                                    gpu_pack_multi_launch(
+                                        src->data->Bg->stream,
+                                        d_src_arr, d_dst_arr, (int)nvar,
+                                        src->data->Bg->shape[0], src->data->Bg->shape[1],
+                                        dst->data->shape[0], dst->data->shape[1], dst->data->shape[2],
+                                        off_x, off_y, off_z
+                                    );
+                                    free_src_arrays.push_back(d_src_arr);
+                                    free_dst_arrays.push_back(d_dst_arr);
+                                }
+                                break;
+                            }
+
+                            case 2: {
+                                if (varls == VarLists) {
+                                    std::vector<const double*> h_src;
+                                    std::vector<double*> h_dst;
+                                    std::vector<double> h_soa;
+                                    int elem = dst->data->shape[0] * dst->data->shape[1] * dst->data->shape[2];
+                                    MyList<var> *batch_s = VarLists;
+                                    MyList<var> *batch_d = VarListd;
+                                    int batch_offset = size_out;
+                                    while (batch_s && batch_d) {
+                                        h_src.push_back(src->data->Bg->d_fgfs[batch_s->data->sgfn]);
+                                        h_dst.push_back(d_data + batch_offset);
+                                        h_soa.push_back(batch_s->data->SoA[0]);
+                                        h_soa.push_back(batch_s->data->SoA[1]);
+                                        h_soa.push_back(batch_s->data->SoA[2]);
+                                        batch_offset += elem;
+                                        batch_s = batch_s->next;
+                                        batch_d = batch_d->next;
+                                    }
+                                    const double** d_src_arr = nullptr;
+                                    double** d_dst_arr = nullptr;
+                                    double* d_soa = nullptr;
+                                    size_t nvar = h_src.size();
+                                    cudaMalloc((void**)&d_src_arr, nvar * sizeof(const double*));
+                                    cudaMalloc((void**)&d_dst_arr, nvar * sizeof(double*));
+                                    cudaMalloc((void**)&d_soa, h_soa.size() * sizeof(double));
+                                    cudaMemcpyAsync(d_src_arr, h_src.data(), nvar * sizeof(const double*),
+                                                    cudaMemcpyHostToDevice, src->data->Bg->stream);
+                                    cudaMemcpyAsync(d_dst_arr, h_dst.data(), nvar * sizeof(double*),
+                                                    cudaMemcpyHostToDevice, src->data->Bg->stream);
+                                    cudaMemcpyAsync(d_soa, h_soa.data(), h_soa.size() * sizeof(double),
+                                                    cudaMemcpyHostToDevice, src->data->Bg->stream);
+                                    gpu_restrict3_multi_var_launch(
+                                        src->data->Bg->stream,
+                                        d_src_arr, d_dst_arr, (int)nvar, d_soa,
+                                        dst->data->llb, dst->data->uub, dst->data->shape,
+                                        src->data->Bg->bbox, src->data->Bg->bbox + dim, src->data->Bg->shape,
+                                        dst->data->llb, dst->data->uub, Symmetry
+                                    );
+                                    free_src_arrays.push_back(d_src_arr);
+                                    free_dst_arrays.push_back(d_dst_arr);
+                                    free_soa_arrays.push_back(d_soa);
+                                }
+                                break;
+                            }
+
+                            case 3: {
+                                gpu_prolong3_launch(
+                                    src->data->Bg->stream,
+                                    d_src_ptr, d_dst_ptr, // src_c, dst_f
+                                    src->data->Bg->bbox, src->data->Bg->bbox + dim, src->data->Bg->shape, 
+                                    dst->data->llb, dst->data->uub, dst->data->shape,        
+                                    dst->data->llb, dst->data->uub, 
+                                    varls->data->SoA, Symmetry, 1
+                                );
+                                gpu_prolong3_launch_int(
+                                    src->data->Bg->stream,
+                                    d_src_ptr, d_dst_ptr, // src_c, dst_f
+                                    src->data->Bg->bbox, src->data->Bg->bbox + dim, src->data->Bg->shape, 
+                                    dst->data->llb, dst->data->uub, dst->data->shape,        
+                                    dst->data->llb, dst->data->uub, 
+                                    varls->data->SoA, Symmetry, 0
+                                );
+                                break;
+                            }
+                            }
+                        }
+                    
+                        if (dir == UNPACK) {
+                            double* d_src_ptr = d_data + size_out;
+                            double* d_dst_ptr = dst->data->Bg->d_fgfs[varld->data->sgfn];
+
+                            double dx = (dst->data->Bg->bbox[3] - dst->data->Bg->bbox[0]) / dst->data->Bg->shape[0];
+                            double dy = (dst->data->Bg->bbox[4] - dst->data->Bg->bbox[1]) / dst->data->Bg->shape[1];
+                            double dz = (dst->data->Bg->bbox[5] - dst->data->Bg->bbox[2]) / dst->data->Bg->shape[2];
+
+                            // 计算收到的一维幽灵区数据在目标大网格中的 0-based 写入起始索引
+                            int off_x = (int)std::trunc((dst->data->llb[0] - dst->data->Bg->bbox[0]) / dx + 0.4);
+                            int off_y = (int)std::trunc((dst->data->llb[1] - dst->data->Bg->bbox[1]) / dy + 0.4);
+                            int off_z = (int)std::trunc((dst->data->llb[2] - dst->data->Bg->bbox[2]) / dz + 0.4);
+
+                            if (varls == VarLists) {
+                                std::vector<const double*> h_src;
+                                std::vector<double*> h_dst;
+                                MyList<var> *batch_s = VarLists;
+                                MyList<var> *batch_d = VarListd;
+                                int elem = dst->data->shape[0] * dst->data->shape[1] * dst->data->shape[2];
+                                int batch_offset = size_out;
+                                while (batch_s && batch_d) {
+                                    h_src.push_back(d_data + batch_offset);
+                                    h_dst.push_back(dst->data->Bg->d_fgfs[batch_d->data->sgfn]);
+                                    batch_offset += elem;
+                                    batch_s = batch_s->next;
+                                    batch_d = batch_d->next;
+                                }
+                                const double** d_src_arr = nullptr;
+                                double** d_dst_arr = nullptr;
+                                size_t nvar = h_src.size();
+                                cudaMalloc((void**)&d_src_arr, nvar * sizeof(const double*));
+                                cudaMalloc((void**)&d_dst_arr, nvar * sizeof(double*));
+                                cudaMemcpyAsync(d_src_arr, h_src.data(), nvar * sizeof(const double*),
+                                                cudaMemcpyHostToDevice, dst->data->Bg->stream);
+                                cudaMemcpyAsync(d_dst_arr, h_dst.data(), nvar * sizeof(double*),
+                                                cudaMemcpyHostToDevice, dst->data->Bg->stream);
+                                gpu_unpack_multi_launch(
+                                    dst->data->Bg->stream,
+                                    d_src_arr, d_dst_arr, (int)nvar,
+                                    dst->data->Bg->shape[0], dst->data->Bg->shape[1],
+                                    dst->data->shape[0], dst->data->shape[1], dst->data->shape[2],
+                                    off_x, off_y, off_z
+                                );
+                                free_src_arrays.push_back(d_src_arr);
+                                free_dst_arrays.push_back(d_dst_arr);
+                            }
+                        }
+                    }
+                    size_out += dst->data->shape[0] * dst->data->shape[1] * dst->data->shape[2];
+                    varls = varls->next;
+                    varld = varld->next;
+                }
             }
-        }
+            }
         dst = dst->next;
         src = src->next;
     }
     GPUManager::getInstance().synchronize_all();
+    for (const double** p : free_src_arrays) cudaFree((void*)p);
+    for (double** p : free_dst_arrays) cudaFree((void*)p);
+    for (double* p : free_soa_arrays) cudaFree(p);
 
     return size_out;
 }

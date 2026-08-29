@@ -455,6 +455,150 @@ __global__ void prolong3_multi_kernel_int(
     }
 }
 
+__global__ void prolong3_multi_var_kernel_int(
+    int Gi, int Gj, int Gk,
+    int lead_base0, int lead_base1, int lead_base2,
+    int cxI_base0, int cxI_base1, int cxI_base2,
+    int i_start, int i_end, int j_start, int j_end, int k_start, int k_end,
+    int extc0, int extc1, int extc2,
+    const double* const* __restrict__ d_src_c_arr,
+    int extf0, int extf1, int extf2,
+    double* const* __restrict__ d_dst_f_arr,
+    const double* __restrict__ d_SoA_all, int num_var,
+    int Symmetry, int skip_interior, int compact_mode,
+    int lo_i, int hi_i, int lo_j, int hi_j, int lo_k, int hi_k
+) {
+    int var_idx = blockIdx.y;
+    if (var_idx >= num_var) return;
+    const double* d_src_c = d_src_c_arr[var_idx];
+    double* d_dst_f = d_dst_f_arr[var_idx];
+    double SoA0 = d_SoA_all[3 * var_idx + 0];
+    double SoA1 = d_SoA_all[3 * var_idx + 1];
+    double SoA2 = d_SoA_all[3 * var_idx + 2];
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int g_i, g_j, g_k;
+#ifndef PROLONG3_INTERIOR
+    if (compact_mode) {
+        int N = p3_bnd_count(Gi, Gj, Gk, lo_i, hi_i, lo_j, hi_j, lo_k, hi_k);
+        if (idx >= N) return;
+        p3_bnd_map(idx, Gi, Gj, Gk, lo_i, hi_i, lo_j, hi_j, lo_k, hi_k,
+                   &g_i, &g_j, &g_k);
+    } else {
+        int total = Gi * Gj * Gk;
+        if (idx >= total) return;
+        g_k = idx / (Gi * Gj);
+        int rem = idx % (Gi * Gj);
+        g_j = rem / Gi;
+        g_i = rem % Gi;
+    }
+#else
+    // interior kernel: full-box group enumeration only
+    int total = Gi * Gj * Gk;
+    if (idx >= total) return;
+    g_k = idx / (Gi * Gj);
+    int rem = idx % (Gi * Gj);
+    g_j = rem / Gi;
+    g_i = rem % Gi;
+    (void)compact_mode; (void)lo_i; (void)hi_i; (void)lo_j; (void)hi_j;
+    (void)lo_k; (void)hi_k;
+#endif
+
+    // group leader (fine indices) and coarse anchor; cxI is group-uniform
+    int li = lead_base0 + 2 * g_i;
+    int lj = lead_base1 + 2 * g_j;
+    int lk = lead_base2 + 2 * g_k;
+    int cxI_i = cxI_base0 + g_i;
+    int cxI_j = cxI_base1 + g_j;
+    int cxI_k = cxI_base2 + g_k;
+
+#ifdef PROLONG3_INTERIOR
+    // interior-only kernel: skip boundary groups entirely (all 8 members
+    // share cxI, so the classification is group-uniform)
+    if (cxI_i < 3 || cxI_i > extc0 - 3 ||
+        cxI_j < 3 || cxI_j > extc1 - 3 ||
+        cxI_k < 3 || cxI_k > extc2 - 3) return;
+#else
+    if (skip_interior) {
+        if (cxI_i >= 3 && cxI_i <= extc0 - 3 &&
+            cxI_j >= 3 && cxI_j <= extc1 - 3 &&
+            cxI_k >= 3 && cxI_k <= extc2 - 3) return;
+    }
+#endif
+
+    int extc[3] = {extc0, extc1, extc2};
+    const double SoA[3] = {SoA0, SoA1, SoA2};
+
+    double tmp2[2][6][6];
+
+    // Z-pass over the shared coarse cube: ONE tap load per (m, n, t);
+    // both k-parity rows accumulated with the original statement order.
+    for (int m = 0; m < 6; ++m) {
+        for (int n = 0; n < 6; ++n) {
+            int cur_ic = cxI_i - 2 + n;
+            int cur_jc = cxI_j - 2 + m;
+
+            double a0 = d_symmetry_bd_1b(3, extc, d_src_c, cur_ic, cur_jc, cxI_k - 2, SoA);
+            double a1 = d_symmetry_bd_1b(3, extc, d_src_c, cur_ic, cur_jc, cxI_k - 1, SoA);
+            double a2 = d_symmetry_bd_1b(3, extc, d_src_c, cur_ic, cur_jc, cxI_k    , SoA);
+            double a3 = d_symmetry_bd_1b(3, extc, d_src_c, cur_ic, cur_jc, cxI_k + 1, SoA);
+            double a4 = d_symmetry_bd_1b(3, extc, d_src_c, cur_ic, cur_jc, cxI_k + 2, SoA);
+            double a5 = d_symmetry_bd_1b(3, extc, d_src_c, cur_ic, cur_jc, cxI_k + 3, SoA);
+
+            double v0 = 0.0;
+            double v1 = 0.0;
+            v0 += C_PROLONG[0] * a0; v1 += C_PROLONG[5] * a0;
+            v0 += C_PROLONG[1] * a1; v1 += C_PROLONG[4] * a1;
+            v0 += C_PROLONG[2] * a2; v1 += C_PROLONG[3] * a2;
+            v0 += C_PROLONG[3] * a3; v1 += C_PROLONG[2] * a3;
+            v0 += C_PROLONG[4] * a4; v1 += C_PROLONG[1] * a4;
+            v0 += C_PROLONG[5] * a5; v1 += C_PROLONG[0] * a5;
+
+            tmp2[0][m][n] = v0;
+            tmp2[1][m][n] = v1;
+        }
+    }
+
+    // Y/X passes per member parity combination (dj == 0 -> j_even, etc.)
+    for (int dk = 0; dk < 2; ++dk) {
+        for (int dj = 0; dj < 2; ++dj) {
+            double tmp1[6];
+            for (int n = 0; n < 6; ++n) {
+                double val = 0.0;
+                if (dj == 0) {
+                    val += C_PROLONG[0] * tmp2[dk][0][n] + C_PROLONG[1] * tmp2[dk][1][n] +
+                           C_PROLONG[2] * tmp2[dk][2][n] + C_PROLONG[3] * tmp2[dk][3][n] +
+                           C_PROLONG[4] * tmp2[dk][4][n] + C_PROLONG[5] * tmp2[dk][5][n];
+                } else {
+                    val += C_PROLONG[5] * tmp2[dk][0][n] + C_PROLONG[4] * tmp2[dk][1][n] +
+                           C_PROLONG[3] * tmp2[dk][2][n] + C_PROLONG[2] * tmp2[dk][3][n] +
+                           C_PROLONG[1] * tmp2[dk][4][n] + C_PROLONG[0] * tmp2[dk][5][n];
+                }
+                tmp1[n] = val;
+            }
+            for (int di = 0; di < 2; ++di) {
+                int i = li + di;
+                int j = lj + dj;
+                int k = lk + dk;
+                if (i < i_start || i > i_end ||
+                    j < j_start || j > j_end ||
+                    k < k_start || k > k_end) continue;
+                double final_val = 0.0;
+                if (di == 0) {
+                    final_val += C_PROLONG[0] * tmp1[0] + C_PROLONG[1] * tmp1[1] +
+                                 C_PROLONG[2] * tmp1[2] + C_PROLONG[3] * tmp1[3] +
+                                 C_PROLONG[4] * tmp1[4] + C_PROLONG[5] * tmp1[5];
+                } else {
+                    final_val += C_PROLONG[5] * tmp1[0] + C_PROLONG[4] * tmp1[1] +
+                                 C_PROLONG[3] * tmp1[2] + C_PROLONG[2] * tmp1[3] +
+                                 C_PROLONG[1] * tmp1[4] + C_PROLONG[0] * tmp1[5];
+                }
+                int out_idx = get_col_major_idx(i, j, k, extf0, extf1, extf2);
+                d_dst_f[out_idx] = final_val;
+            }
+        }
+    }
+}
 __global__ void prolong3_kernel_int(
     int ni, int nj, int nk,
     int i_start, int j_start, int k_start,
@@ -647,6 +791,88 @@ void gpu_prolong3_launch_int(
     );
 }
 
+void gpu_prolong3_multi_var_launch_int(
+    cudaStream_t stream,
+    const double* const* d_src_c_arr, double* const* d_dst_f_arr,
+    int num_var, const double* d_SoA_all,
+    const double* llbc, const double* uubc, const int* extc,
+    const double* llbf, const double* uubf, const int* extf,
+    const double* llbt, const double* uubt,
+    int Symmetry, int skip_interior
+) {
+    double CD[3], FD[3], base[3];
+    for(int d = 0; d < 3; d++) {
+        CD[d] = (uubc[d] - llbc[d]) / (double)extc[d];
+        FD[d] = (uubf[d] - llbf[d]) / (double)extf[d];
+        if (llbc[d] <= llbf[d]) {
+            base[d] = llbc[d];
+        } else {
+            // 修正：使用 std::trunc 完美对齐 Fortran 的 idint (向零取整)
+            int j_val = (int)std::trunc((llbc[d] - llbf[d]) / FD[d] + 0.4);
+            if ((j_val / 2) * 2 == j_val) base[d] = llbf[d];
+            else base[d] = llbf[d] - CD[d] / 2.0;
+        }
+    }
+
+    int i_start, i_end, j_start, j_end, k_start, k_end;
+    for(int d = 0; d < 3; d++) {
+        // 修正：使用 std::trunc
+        int lbp = (int)std::trunc((llbt[d] - base[d]) / FD[d] + 0.4) + 1;
+        int ubp = (int)std::trunc((uubt[d] - base[d]) / FD[d] + 0.4);
+        int lbf = (int)std::trunc((llbf[d] - base[d]) / FD[d] + 0.4) + 1;
+        
+        if (d == 0) { i_start = lbp - lbf; i_end = ubp - lbf; }
+        if (d == 1) { j_start = lbp - lbf; j_end = ubp - lbf; }
+        if (d == 2) { k_start = lbp - lbf; k_end = ubp - lbf; }
+    }
+
+    int ni = i_end - i_start + 1;
+    int nj = j_end - j_start + 1;
+    int nk = k_end - k_start + 1;
+
+    if (ni <= 0 || nj <= 0 || nk <= 0) return; // 剔除空操作
+
+    int total_points = ni * nj * nk;
+    (void)total_points;
+
+    // P33: parity-aligned 2x2x2 group geometry (mirror of the base launcher;
+    // lbf/lbc computed with the device-side 0.4f formulas so the group cxI
+    // matches the per-point kernel's cxI bit-exactly).
+    int lbf_p3[3], lbc_p3[3];
+    for (int d = 0; d < 3; d++) {
+        double tv = (llbf[d] - base[d]) / FD[d] + 0.4f;
+        double tc = (llbc[d] - base[d]) / CD[d] + 0.4f;
+        int v = (fabs(tv) < 1.0) ? 0 : (int)tv;
+        int c = (fabs(tc) < 1.0) ? 0 : (int)tc;
+        lbf_p3[d] = v + 1;
+        lbc_p3[d] = c + 1;
+    }
+    int st[3] = {i_start, j_start, k_start};
+    int en[3] = {i_end, j_end, k_end};
+    int lead_base[3], cxI_base[3], G[3];
+    for (int d = 0; d < 3; d++) {
+        lead_base[d] = st[d] - ((st[d] + lbf_p3[d]) & 1);
+        cxI_base[d] = (lead_base[d] + lbf_p3[d]) / 2 - lbc_p3[d] + 1;
+        G[d] = (en[d] - lead_base[d]) / 2 + 1;
+    }
+
+    int block = 256;
+    int grid = (G[0] * G[1] * G[2] + block - 1) / block;
+
+    prolong3_multi_var_kernel_int<<<dim3(grid, num_var), block, 0, stream>>>(
+        G[0], G[1], G[2],
+        lead_base[0], lead_base[1], lead_base[2],
+        cxI_base[0], cxI_base[1], cxI_base[2],
+        i_start, i_end, j_start, j_end, k_start, k_end,
+        extc[0], extc[1], extc[2],
+        d_src_c_arr,
+        extf[0], extf[1], extf[2],
+        d_dst_f_arr,
+        d_SoA_all, num_var,
+        Symmetry, skip_interior, 0,
+        0, 0, 0, 0, 0, 0
+    );
+}
 void gpu_restrict3_launch_int(
     cudaStream_t stream,
     const double* d_src_f, double* d_dst_c,

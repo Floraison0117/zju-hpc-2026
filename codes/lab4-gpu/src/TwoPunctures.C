@@ -1978,6 +1978,10 @@ void TwoPunctures::SetMatrix_JFD(int nvar, int n1, int n2, int n3, derivs u,
 void TwoPunctures::J_times_dv(int nvar, int n1, int n2, int n3, derivs dv, double *Jdv, derivs u)
 {
 #ifdef USE_GPU
+  /* GPU kernel consumes dv.d1..dv.d33 (spectral derivatives of dv.d0), which
+   * only exist after Derivatives_AB3; without it J*dv is evaluated with
+   * stale/zero derivatives and BiCGStab diverges. Compute them first. */
+  Derivatives_AB3(nvar, n1, n2, n3, dv);
   gpu_J_times_dv(nvar, n1, n2, n3,
                  dv.d0, dv.d1, dv.d2, dv.d3, dv.d11, dv.d12, dv.d13,
                  dv.d22, dv.d23, dv.d33,

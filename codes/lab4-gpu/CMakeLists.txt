@@ -113,7 +113,7 @@ set(ABEGPU_CXX_SOURCES
 )
 set(ABEGPU_CUDA_SOURCES
   src/fmisc_gpu.cu src/lopsidediff_gpu.cu src/kodiss_gpu.cu src/diff_new_gpu.cu
-  src/bssn_rhs_gpu.cu src/bssn_rhs_gpu_int.cu src/bssn_rhs_gpu_face.cu src/bssn_rhs_gpu_facez.cu src/prolongrestrict_cell_gpu.cu src/prolongrestrict_cell_gpu_int.cu src/gpu_manager.cu
+  src/bssn_rhs_gpu.cu src/bssn_rhs_gpu_int.cu src/bssn_rhs_gpu_face_x.cu src/bssn_rhs_gpu_face_y.cu src/bssn_rhs_gpu_face_z.cu src/prolongrestrict_cell_gpu.cu src/prolongrestrict_cell_gpu_int.cu src/gpu_manager.cu
   src/enforce_algebra_gpu.cu src/sommerfeld_rout_gpu.cu src/rungekutta4_rout_gpu.cu
   src/fadmquantites_bssn_gpu.cu src/misc_gpu.cu src/MPatch_gpu.cu
   src/surface_integral_gpu.cu src/getnp4_gpu.cu

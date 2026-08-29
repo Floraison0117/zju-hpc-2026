@@ -98,39 +98,39 @@ __host__ __device__ static inline void bnd_map_region(int n, int r, int ex0, int
 }
 
 
-__global__ __launch_bounds__(256, 2) void rhs_kernel(
-    int ex0, int ex1, int ex2, double T, double* X, double* Y, double* Z,
-    double* chi, double* trK,
-    double* dxx, double* gxy, double* gxz,
-    double* dyy, double* gyz, double* dzz,
-    double* Axx, double* Axy, double* Axz,
-    double* Ayy, double* Ayz, double* Azz,
-    double* Gamx, double* Gamy, double* Gamz,
-    double* Lap,
-    double* betax, double* betay, double* betaz,
-    double* dtSfx, double* dtSfy, double* dtSfz,
-    double* chi_rhs, double* trK_rhs,
-    double* gxx_rhs, double* gxy_rhs, double* gxz_rhs,
-    double* gyy_rhs, double* gyz_rhs, double* gzz_rhs,
-    double* Axx_rhs, double* Axy_rhs, double* Axz_rhs,
-    double* Ayy_rhs, double* Ayz_rhs, double* Azz_rhs,
-    double* Gamx_rhs, double* Gamy_rhs, double* Gamz_rhs,
-    double* Lap_rhs,
-    double* betax_rhs, double* betay_rhs, double* betaz_rhs,
-    double* dtSfx_rhs, double* dtSfy_rhs, double* dtSfz_rhs,
-    double* rho, double* Sx, double* Sy, double* Sz,
-    double* Sxx, double* Sxy, double* Sxz,
-    double* Syy, double* Syz, double* Szz,
-    double* Gamxxx, double* Gamxxy, double* Gamxxz,
-    double* Gamxyy, double* Gamxyz, double* Gamxzz,
-    double* Gamyxx, double* Gamyxy, double* Gamyxz,
-    double* Gamyyy, double* Gamyyz, double* Gamyzz,
-    double* Gamzxx, double* Gamzxy, double* Gamzxz,
-    double* Gamzyy, double* Gamzyz, double* Gamzzz,
-    double* Rxx, double* Rxy, double* Rxz,
-    double* Ryy, double* Ryz, double* Rzz,
-    double* ham_Res, double* movx_Res, double* movy_Res, double* movz_Res,
-    double* Gmx_Res, double* Gmy_Res, double* Gmz_Res,
+__global__ __launch_bounds__(128, 2) void rhs_kernel(
+    int ex0, int ex1, int ex2, double T, double* __restrict__ X, double* __restrict__ Y, double* __restrict__ Z,
+    double* __restrict__ chi, double* __restrict__ trK,
+    double* __restrict__ dxx, double* __restrict__ gxy, double* __restrict__ gxz,
+    double* __restrict__ dyy, double* __restrict__ gyz, double* __restrict__ dzz,
+    double* __restrict__ Axx, double* __restrict__ Axy, double* __restrict__ Axz,
+    double* __restrict__ Ayy, double* __restrict__ Ayz, double* __restrict__ Azz,
+    double* __restrict__ Gamx, double* __restrict__ Gamy, double* __restrict__ Gamz,
+    double* __restrict__ Lap,
+    double* __restrict__ betax, double* __restrict__ betay, double* __restrict__ betaz,
+    double* __restrict__ dtSfx, double* __restrict__ dtSfy, double* __restrict__ dtSfz,
+    double* __restrict__ chi_rhs, double* __restrict__ trK_rhs,
+    double* __restrict__ gxx_rhs, double* __restrict__ gxy_rhs, double* __restrict__ gxz_rhs,
+    double* __restrict__ gyy_rhs, double* __restrict__ gyz_rhs, double* __restrict__ gzz_rhs,
+    double* __restrict__ Axx_rhs, double* __restrict__ Axy_rhs, double* __restrict__ Axz_rhs,
+    double* __restrict__ Ayy_rhs, double* __restrict__ Ayz_rhs, double* __restrict__ Azz_rhs,
+    double* __restrict__ Gamx_rhs, double* __restrict__ Gamy_rhs, double* __restrict__ Gamz_rhs,
+    double* __restrict__ Lap_rhs,
+    double* __restrict__ betax_rhs, double* __restrict__ betay_rhs, double* __restrict__ betaz_rhs,
+    double* __restrict__ dtSfx_rhs, double* __restrict__ dtSfy_rhs, double* __restrict__ dtSfz_rhs,
+    double* __restrict__ rho, double* __restrict__ Sx, double* __restrict__ Sy, double* __restrict__ Sz,
+    double* __restrict__ Sxx, double* __restrict__ Sxy, double* __restrict__ Sxz,
+    double* __restrict__ Syy, double* __restrict__ Syz, double* __restrict__ Szz,
+    double* __restrict__ Gamxxx, double* __restrict__ Gamxxy, double* __restrict__ Gamxxz,
+    double* __restrict__ Gamxyy, double* __restrict__ Gamxyz, double* __restrict__ Gamxzz,
+    double* __restrict__ Gamyxx, double* __restrict__ Gamyxy, double* __restrict__ Gamyxz,
+    double* __restrict__ Gamyyy, double* __restrict__ Gamyyz, double* __restrict__ Gamyzz,
+    double* __restrict__ Gamzxx, double* __restrict__ Gamzxy, double* __restrict__ Gamzxz,
+    double* __restrict__ Gamzyy, double* __restrict__ Gamzyz, double* __restrict__ Gamzzz,
+    double* __restrict__ Rxx, double* __restrict__ Rxy, double* __restrict__ Rxz,
+    double* __restrict__ Ryy, double* __restrict__ Ryz, double* __restrict__ Rzz,
+    double* __restrict__ ham_Res, double* __restrict__ movx_Res, double* __restrict__ movy_Res, double* __restrict__ movz_Res,
+    double* __restrict__ Gmx_Res, double* __restrict__ Gmy_Res, double* __restrict__ Gmz_Res,
     int symmetry, int lev, double eps, int co, int skip_interior, int compact_mode
 ) {
     // ------------------------------------------------------------------------------------
@@ -1078,7 +1078,7 @@ __global__ __launch_bounds__(256, 2) void rhs_kernel(
 }
 
 // Iter26b extern face kernels (defined in bssn_rhs_gpu_face.cu / _facez.cu)
-__global__ __launch_bounds__(256, 2) void rhs_kernel_facepure(
+__global__ __launch_bounds__(512, 1) void rhs_kernel_face_x(
     int ex0, int ex1, int ex2, double T, double* X, double* Y, double* Z,
     double* chi, double* trK,
     double* dxx, double* gxy, double* gxz,
@@ -1113,7 +1113,112 @@ __global__ __launch_bounds__(256, 2) void rhs_kernel_facepure(
     double* Gmx_Res, double* Gmy_Res, double* Gmz_Res,
     int symmetry, int lev, double eps, int co, int skip_interior, int region
 );
-__global__ __launch_bounds__(256, 2) void rhs_kernel_facez(
+__global__ __launch_bounds__(512, 1) void rhs_kernel_face_y(
+    int ex0, int ex1, int ex2, double T, double* X, double* Y, double* Z,
+    double* chi, double* trK,
+    double* dxx, double* gxy, double* gxz,
+    double* dyy, double* gyz, double* dzz,
+    double* Axx, double* Axy, double* Axz,
+    double* Ayy, double* Ayz, double* Azz,
+    double* Gamx, double* Gamy, double* Gamz,
+    double* Lap,
+    double* betax, double* betay, double* betaz,
+    double* dtSfx, double* dtSfy, double* dtSfz,
+    double* chi_rhs, double* trK_rhs,
+    double* gxx_rhs, double* gxy_rhs, double* gxz_rhs,
+    double* gyy_rhs, double* gyz_rhs, double* gzz_rhs,
+    double* Axx_rhs, double* Axy_rhs, double* Axz_rhs,
+    double* Ayy_rhs, double* Ayz_rhs, double* Azz_rhs,
+    double* Gamx_rhs, double* Gamy_rhs, double* Gamz_rhs,
+    double* Lap_rhs,
+    double* betax_rhs, double* betay_rhs, double* betaz_rhs,
+    double* dtSfx_rhs, double* dtSfy_rhs, double* dtSfz_rhs,
+    double* rho, double* Sx, double* Sy, double* Sz,
+    double* Sxx, double* Sxy, double* Sxz,
+    double* Syy, double* Syz, double* Szz,
+    double* Gamxxx, double* Gamxxy, double* Gamxxz,
+    double* Gamxyy, double* Gamxyz, double* Gamxzz,
+    double* Gamyxx, double* Gamyxy, double* Gamyxz,
+    double* Gamyyy, double* Gamyyz, double* Gamyzz,
+    double* Gamzxx, double* Gamzxy, double* Gamzxz,
+    double* Gamzyy, double* Gamzyz, double* Gamzzz,
+    double* Rxx, double* Rxy, double* Rxz,
+    double* Ryy, double* Ryz, double* Rzz,
+    double* ham_Res, double* movx_Res, double* movy_Res, double* movz_Res,
+    double* Gmx_Res, double* Gmy_Res, double* Gmz_Res,
+    int symmetry, int lev, double eps, int co, int skip_interior, int region
+);
+__global__ __launch_bounds__(512, 1) void rhs_kernel_face_z(
+    int ex0, int ex1, int ex2, double T, double* X, double* Y, double* Z,
+    double* chi, double* trK,
+    double* dxx, double* gxy, double* gxz,
+    double* dyy, double* gyz, double* dzz,
+    double* Axx, double* Axy, double* Axz,
+    double* Ayy, double* Ayz, double* Azz,
+    double* Gamx, double* Gamy, double* Gamz,
+    double* Lap,
+    double* betax, double* betay, double* betaz,
+    double* dtSfx, double* dtSfy, double* dtSfz,
+    double* chi_rhs, double* trK_rhs,
+    double* gxx_rhs, double* gxy_rhs, double* gxz_rhs,
+    double* gyy_rhs, double* gyz_rhs, double* gzz_rhs,
+    double* Axx_rhs, double* Axy_rhs, double* Axz_rhs,
+    double* Ayy_rhs, double* Ayz_rhs, double* Azz_rhs,
+    double* Gamx_rhs, double* Gamy_rhs, double* Gamz_rhs,
+    double* Lap_rhs,
+    double* betax_rhs, double* betay_rhs, double* betaz_rhs,
+    double* dtSfx_rhs, double* dtSfy_rhs, double* dtSfz_rhs,
+    double* rho, double* Sx, double* Sy, double* Sz,
+    double* Sxx, double* Sxy, double* Sxz,
+    double* Syy, double* Syz, double* Szz,
+    double* Gamxxx, double* Gamxxy, double* Gamxxz,
+    double* Gamxyy, double* Gamxyz, double* Gamxzz,
+    double* Gamyxx, double* Gamyxy, double* Gamyxz,
+    double* Gamyyy, double* Gamyyz, double* Gamyzz,
+    double* Gamzxx, double* Gamzxy, double* Gamzxz,
+    double* Gamzyy, double* Gamzyz, double* Gamzzz,
+    double* Rxx, double* Rxy, double* Rxz,
+    double* Ryy, double* Ryz, double* Rzz,
+    double* ham_Res, double* movx_Res, double* movy_Res, double* movz_Res,
+    double* Gmx_Res, double* Gmy_Res, double* Gmz_Res,
+    int symmetry, int lev, double eps, int co, int skip_interior, int region
+);
+__global__ __launch_bounds__(512, 1) void rhs_kernel_face_z_core(
+    int ex0, int ex1, int ex2, double T, double* X, double* Y, double* Z,
+    double* chi, double* trK,
+    double* dxx, double* gxy, double* gxz,
+    double* dyy, double* gyz, double* dzz,
+    double* Axx, double* Axy, double* Axz,
+    double* Ayy, double* Ayz, double* Azz,
+    double* Gamx, double* Gamy, double* Gamz,
+    double* Lap,
+    double* betax, double* betay, double* betaz,
+    double* dtSfx, double* dtSfy, double* dtSfz,
+    double* chi_rhs, double* trK_rhs,
+    double* gxx_rhs, double* gxy_rhs, double* gxz_rhs,
+    double* gyy_rhs, double* gyz_rhs, double* gzz_rhs,
+    double* Axx_rhs, double* Axy_rhs, double* Axz_rhs,
+    double* Ayy_rhs, double* Ayz_rhs, double* Azz_rhs,
+    double* Gamx_rhs, double* Gamy_rhs, double* Gamz_rhs,
+    double* Lap_rhs,
+    double* betax_rhs, double* betay_rhs, double* betaz_rhs,
+    double* dtSfx_rhs, double* dtSfy_rhs, double* dtSfz_rhs,
+    double* rho, double* Sx, double* Sy, double* Sz,
+    double* Sxx, double* Sxy, double* Sxz,
+    double* Syy, double* Syz, double* Szz,
+    double* Gamxxx, double* Gamxxy, double* Gamxxz,
+    double* Gamxyy, double* Gamxyz, double* Gamxzz,
+    double* Gamyxx, double* Gamyxy, double* Gamyxz,
+    double* Gamyyy, double* Gamyyz, double* Gamyzz,
+    double* Gamzxx, double* Gamzxy, double* Gamzxz,
+    double* Gamzyy, double* Gamzyz, double* Gamzzz,
+    double* Rxx, double* Rxy, double* Rxz,
+    double* Ryy, double* Ryz, double* Rzz,
+    double* ham_Res, double* movx_Res, double* movy_Res, double* movz_Res,
+    double* Gmx_Res, double* Gmy_Res, double* Gmz_Res,
+    int symmetry, int lev, double eps, int co, int skip_interior, int region
+);
+__global__ __launch_bounds__(512, 1) void rhs_kernel_face_z_advection(
     int ex0, int ex1, int ex2, double T, double* X, double* Y, double* Z,
     double* chi, double* trK,
     double* dxx, double* gxy, double* gxz,
@@ -1189,7 +1294,8 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
     // (RHSFACE_PURE_XY), R6 (REST) -> rhs_kernel (generic masks). Legacy
     // full-volume launch kept for small patches / generic fallback.
     int compact_mode = (ex[0] >= 8 && ex[1] >= 8 && ex[2] >= 8) ? 1 : 0;
-    dim3 block(256, 1, 1);
+    dim3 block(128, 1, 1);
+    dim3 face_block(512, 1, 1);
     dim3 block3(8, 8, 4);
     dim3 grid3(
         (ex[0] + 7) / 8,
@@ -1197,10 +1303,15 @@ void gpu_compute_rhs_bssn_launch( // launch kernel with device pointers
         (ex[2] + 3) / 4
     );
 
-    // 1. Kernel 1: Derivatives & Connection Coefficients (per-region launch)
-    if (bnd_region_size(0, ex[0], ex[1], ex[2]) > 0) {
-        dim3 g1((bnd_region_size(0, ex[0], ex[1], ex[2]) + 255) / 256);
-        rhs_kernel_facepure<<<g1, block, 0, stream>>>(
+    // Axis-specialized compact face launches.  Each kernel covers the two
+    // opposite faces of one normal axis, so derivative helpers can remove
+    // the other two axes' boundary tests at compile time.
+    int face_x_total = bnd_region_size(0, ex[0], ex[1], ex[2])
+                      + bnd_region_size(1, ex[0], ex[1], ex[2]);
+    if (face_x_total > 0) {
+        dim3 gx((face_x_total + 511) / 512);
+        rhs_kernel_face_x<<<gx, face_block, 0, stream>>>(
+
 ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
         d_chi, d_trK,
         d_dxx, d_gxy, d_gxz,
@@ -1236,47 +1347,12 @@ ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
             symmetry, lev, eps, co, 1, 0
         );
     }
-    if (bnd_region_size(1, ex[0], ex[1], ex[2]) > 0) {
-        dim3 g2((bnd_region_size(1, ex[0], ex[1], ex[2]) + 255) / 256);
-        rhs_kernel_facepure<<<g2, block, 0, stream>>>(
-ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
-        d_chi, d_trK,
-        d_dxx, d_gxy, d_gxz,
-        d_dyy, d_gyz, d_dzz,
-        d_Axx, d_Axy, d_Axz,
-        d_Ayy, d_Ayz, d_Azz,
-        d_Gamx, d_Gamy, d_Gamz,
-        d_Lap,
-        d_betax, d_betay, d_betaz,
-        d_dtSfx, d_dtSfy, d_dtSfz,
-        d_chi_rhs, d_trK_rhs,
-        d_gxx_rhs, d_gxy_rhs, d_gxz_rhs,
-        d_gyy_rhs, d_gyz_rhs, d_gzz_rhs,
-        d_Axx_rhs, d_Axy_rhs, d_Axz_rhs,
-        d_Ayy_rhs, d_Ayz_rhs, d_Azz_rhs,
-        d_Gamx_rhs, d_Gamy_rhs, d_Gamz_rhs,
-        d_Lap_rhs,
-        d_betax_rhs, d_betay_rhs, d_betaz_rhs,
-        d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs,
-        d_rho, d_Sx, d_Sy, d_Sz,
-        d_Sxx, d_Sxy, d_Sxz,
-        d_Syy, d_Syz, d_Szz,
-        d_Gamxxx, d_Gamxxy, d_Gamxxz,
-        d_Gamxyy, d_Gamxyz, d_Gamxzz,
-        d_Gamyxx, d_Gamyxy, d_Gamyxz,
-        d_Gamyyy, d_Gamyyz, d_Gamyzz,
-        d_Gamzxx, d_Gamzxy, d_Gamzxz,
-        d_Gamzyy, d_Gamzyz, d_Gamzzz,
-        d_Rxx, d_Rxy, d_Rxz,
-        d_Ryy, d_Ryz, d_Rzz,
-        d_ham_Res, d_movx_Res, d_movy_Res, d_movz_Res,
-        d_Gmx_Res, d_Gmy_Res, d_Gmz_Res,
-            symmetry, lev, eps, co, 1, 1
-        );
-    }
-    if (bnd_region_size(2, ex[0], ex[1], ex[2]) > 0) {
-        dim3 g3((bnd_region_size(2, ex[0], ex[1], ex[2]) + 255) / 256);
-        rhs_kernel_facepure<<<g3, block, 0, stream>>>(
+    int face_y_total = bnd_region_size(2, ex[0], ex[1], ex[2])
+                      + bnd_region_size(3, ex[0], ex[1], ex[2]);
+    if (face_y_total > 0) {
+        dim3 gy((face_y_total + 511) / 512);
+        rhs_kernel_face_y<<<gy, face_block, 0, stream>>>(
+
 ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
         d_chi, d_trK,
         d_dxx, d_gxy, d_gxz,
@@ -1312,9 +1388,12 @@ ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
             symmetry, lev, eps, co, 1, 2
         );
     }
-    if (bnd_region_size(3, ex[0], ex[1], ex[2]) > 0) {
-        dim3 g4((bnd_region_size(3, ex[0], ex[1], ex[2]) + 255) / 256);
-        rhs_kernel_facepure<<<g4, block, 0, stream>>>(
+    int face_z_total = bnd_region_size(4, ex[0], ex[1], ex[2])
+                      + bnd_region_size(5, ex[0], ex[1], ex[2]);
+    if (face_z_total > 0) {
+        dim3 gz((face_z_total + 511) / 512);
+        rhs_kernel_face_z_core<<<gz, face_block, 0, stream>>>(
+
 ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
         d_chi, d_trK,
         d_dxx, d_gxy, d_gxz,
@@ -1347,12 +1426,10 @@ ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
         d_Ryy, d_Ryz, d_Rzz,
         d_ham_Res, d_movx_Res, d_movy_Res, d_movz_Res,
         d_Gmx_Res, d_Gmy_Res, d_Gmz_Res,
-            symmetry, lev, eps, co, 1, 3
+            symmetry, lev, eps, co, 1, 4
         );
-    }
-    if (bnd_region_size(4, ex[0], ex[1], ex[2]) > 0) {
-        dim3 g5((bnd_region_size(4, ex[0], ex[1], ex[2]) + 255) / 256);
-        rhs_kernel_facez<<<g5, block, 0, stream>>>(
+        rhs_kernel_face_z_advection<<<gz, face_block, 0, stream>>>(
+
 ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
         d_chi, d_trK,
         d_dxx, d_gxy, d_gxz,
@@ -1388,46 +1465,8 @@ ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
             symmetry, lev, eps, co, 1, 4
         );
     }
-    if (bnd_region_size(5, ex[0], ex[1], ex[2]) > 0) {
-        dim3 g6((bnd_region_size(5, ex[0], ex[1], ex[2]) + 255) / 256);
-        rhs_kernel_facez<<<g6, block, 0, stream>>>(
-ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
-        d_chi, d_trK,
-        d_dxx, d_gxy, d_gxz,
-        d_dyy, d_gyz, d_dzz,
-        d_Axx, d_Axy, d_Axz,
-        d_Ayy, d_Ayz, d_Azz,
-        d_Gamx, d_Gamy, d_Gamz,
-        d_Lap,
-        d_betax, d_betay, d_betaz,
-        d_dtSfx, d_dtSfy, d_dtSfz,
-        d_chi_rhs, d_trK_rhs,
-        d_gxx_rhs, d_gxy_rhs, d_gxz_rhs,
-        d_gyy_rhs, d_gyz_rhs, d_gzz_rhs,
-        d_Axx_rhs, d_Axy_rhs, d_Axz_rhs,
-        d_Ayy_rhs, d_Ayz_rhs, d_Azz_rhs,
-        d_Gamx_rhs, d_Gamy_rhs, d_Gamz_rhs,
-        d_Lap_rhs,
-        d_betax_rhs, d_betay_rhs, d_betaz_rhs,
-        d_dtSfx_rhs, d_dtSfy_rhs, d_dtSfz_rhs,
-        d_rho, d_Sx, d_Sy, d_Sz,
-        d_Sxx, d_Sxy, d_Sxz,
-        d_Syy, d_Syz, d_Szz,
-        d_Gamxxx, d_Gamxxy, d_Gamxxz,
-        d_Gamxyy, d_Gamxyz, d_Gamxzz,
-        d_Gamyxx, d_Gamyxy, d_Gamyxz,
-        d_Gamyyy, d_Gamyyz, d_Gamyzz,
-        d_Gamzxx, d_Gamzxy, d_Gamzxz,
-        d_Gamzyy, d_Gamzyz, d_Gamzzz,
-        d_Rxx, d_Rxy, d_Rxz,
-        d_Ryy, d_Ryz, d_Rzz,
-        d_ham_Res, d_movx_Res, d_movy_Res, d_movz_Res,
-        d_Gmx_Res, d_Gmy_Res, d_Gmz_Res,
-            symmetry, lev, eps, co, 1, 5
-        );
-    }
     if (bnd_region_size(6, ex[0], ex[1], ex[2]) > 0) {
-        dim3 g7((bnd_region_size(6, ex[0], ex[1], ex[2]) + 255) / 256);
+        dim3 g7((bnd_region_size(6, ex[0], ex[1], ex[2]) + 127) / 128);
         rhs_kernel<<<g7, block, 0, stream>>>(
 ex[0], ex[1], ex[2], T, d_X, d_Y, d_Z,
         d_chi, d_trK,

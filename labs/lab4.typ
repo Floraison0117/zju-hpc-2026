@@ -154,6 +154,7 @@ Nsight Systems 的内存传输统计显示，Host-to-Device 拷贝占传输时�
 = TwoPuncture 初值求解优化
 
 == 热点驱动的优化路线
+#v(0.5em)
 
 TwoPuncture 同时计入 CPU 与 GPU 两条评分路径。初期预分配、缩短预条件迭代和局部 GPU 化收益很小。进一步 profiling 显示，主要时间位于 `relax` 的矩阵装配与批量三对角求解，以及 `chebft_Zeros` 中重复计算的余弦变换。因此优化对象从容易并行的局部循环转向真实热点。
 
@@ -172,6 +173,7 @@ TwoPuncture 同时计入 CPU 与 GPU 两条评分路径。初期预分配、缩�
 最终栈包含 packed JFD/cols、余弦表缓存和 `AMSS_ENABLE_TWOP_OMP_TUNE`。早期约 290 s 的基线经数据布局和余弦表优化降到约 186 s，红黑并行进一步降到约 73 s；team-hoisting 后，Intel 16 线程代表性结果约 27.8 s。数据来自不同平台与迭代阶段，不能直接拼成单一加速比，但清楚展示了瓶颈从装配、超越函数转移到线程管理的过程。输出在去除时间戳后哈希一致，Newton/BiCGStab 轨迹、裸质量和 ADM 质量保持不变。
 
 == 失败尝试及其意义
+#v(0.5em)
 
 #figure(
   table(
@@ -188,11 +190,8 @@ TwoPuncture 同时计入 CPU 与 GPU 两条评分路径。初期预分配、缩�
 
 = 任务一：ABE CPU 演化优化
 
-任务一的演进从 909.42 s、20 分起步，经过分析相位去 straggler、编译 flag 叠加，最终靠 `compute_rhs_bssn_` 的算法级重写把 OJ 拉进 300.943 s、120 分满分。这一段不是线性堆积优化，而是先回答“时间花在哪、为什么慢”，再逐一排除错误方向，最后在正确路径上连续两次反转结论的过程。
-
-== 迭代零：从 43 s/步到固定成本分解
+== 迭代一：从 43 s/步到固定成本分解
 #v(0.5em)
-
 === 现象与假设
 #v(0.5em)
 
@@ -231,12 +230,12 @@ TwoPuncture 同时计入 CPU 与 GPU 两条评分路径。初期预分配、缩�
     [flag 与 TwoP 阶段], [约 568 s], [48], [固定成本与 RHS 编译改善],
     [`DIST_INTERP + LOADBAL`], [408.915 s], [86], [消除分析 straggler 与负载重分配],
     table.hline(stroke: 1pt),
-  ), caption: [任务一端到端结果演进（重写前）],
+  ), caption: [任务一端到端结果演进],
 )
 
 此时 408.9 s 距 340 s 档位还差约 68.9 s。零步测试把固定开销分解为约 3.8 s TwoPuncture 与约 31 s 网格初始化，40 步演化约 9.35 s/步，因此 340 s 要求每步 ≤7.6 s，即必须再砍约 1.7 s/步。瓶颈已明确收敛到主演化本身。
 
-== 迭代一：`compute_rhs_bssn_` 算法级重写
+== 迭代二：`compute_rhs_bssn_` 算法重写
 #v(0.5em)
 
 === 现象与假设
@@ -244,7 +243,7 @@ TwoPuncture 同时计入 CPU 与 GPU 两条评分路径。初期预分配、缩�
 
 演化相位 9.35 s/步里，`compute_rhs_bssn_` 约占 30%。此前用 `perf` 看到 IPC 1.69、load:FP 3.4:1，据此判断它是数据依赖地板，随后 26 个编译杠杆（unroll、split、gcse、modulo-sched、prefetch、LTO、PGO）全部实测 0 收益，于是短期结论是“约束内不可达”。但这个判断混淆了两件事：编译器已最优只说明“对这批 whole-array 语句调度已到极限”，并不说明“这批语句的算法结构本身最优”。
 
-再往下拆，`compute_rhs_bssn_` 里约 80 个三维中间数组（度规、导数、Christoffel、Ricci 的中间量）以 whole-array 方式逐个物化，每次调用光数组就是约 6.6 MB。gfortran 虽然把每个赋值向量化，但整批中间量反复进出 L1/L2，per-call 计算被 cache-miss 拖到约 19 ms。假设：把 whole-array 改写为显式循环、并把 42 个导数数组从三维物化改成 k 方向滚动窗口，工作集从约 6.6 MB 压进 L2（约 1 MB），即可兑现 §13.11 曾估计但被判定“不保证可达”的收益。
+再往下拆，`compute_rhs_bssn_` 里约 80 个三维中间数组（度规、导数、Christoffel、Ricci 的中间量）以 whole-array 方式逐个物化，每次调用光数组就是约 6.6 MB。gfortran 虽然把每个赋值向量化，但整批中间量反复进出 L1/L2，per-call 计算被 cache-miss 拖到约 19 ms。假设：把 whole-array 改写为显式循环、并把 42 个导数数组从三维物化改成 k 方向滚动窗口，工作集从约 6.6 MB 压进 L2（约 1 MB），即可兑现 “不保证可达”的收益。
 
 === 优化过程
 #v(0.5em)
@@ -256,9 +255,9 @@ TwoPuncture 同时计入 CPU 与 GPU 两条评分路径。初期预分配、缩�
 === 验证与分析
 #v(0.5em)
 
-两阶段结果对比鲜明：点态融合 bit-exact（RMS=0）但反而约 +20% 慢（约 11 s/步），因为只消除了约 20 个点态数组，42 个导数数组仍物化，显式循环的寄存器依赖净效果为负；k-滚动融合则真正把工作集压进 L2，5 步短跑 bit-exact，40 步全量（job 151519）FINAL PASS、RMS=0，avg 7.27 s/步，Program Cost 297.31 s。部署到 `~/lab4-cpu` 后复验 40 步 284.78 s（job 151782）。
+两阶段结果对比鲜明：点态融合 bit-exact（RMS=0）但反而约 +20% 慢（约 11 s/步），因为只消除了约 20 个点态数组，42 个导数数组仍物化，显式循环的寄存器依赖净效果为负；k-滚动融合则真正把工作集压进 L2，5 步短跑 bit-exact，40 步全量（job 151519）FINAL PASS、RMS=0，avg 7.27 s/步，Program Cost 297.31 s。部署到 `~/lab4-cpu` 后复验 40 步 284.78 。
 
-关键点是显式循环与 whole-array 在 gfortran 下编译为相同求和序，因此重写全程没有引入任何浮点重排，RMS 始终为 0。所谓“算法重写高风险”的预设并不成立，风险实际是代码量而非正确性。
+关键点是显式循环与 whole-array 在 gfortran 下编译为相同求和序，因此重写全程没有引入任何浮点重排，RMS 始终为 0。
 
 #figure(
   table(
@@ -271,10 +270,7 @@ TwoPuncture 同时计入 CPU 与 GPU 两条评分路径。初期预分配、缩�
   ), caption: [compute_rhs 重写两阶段对比（5 步短跑稳态）],
 )
 
-== 迭代二：OJ 满分与正确性终验
-#v(0.5em)
-
-部署前按三级验证体系执行：Level 0 静态检查（编译、预编译 diff、配置防漂移清单），Level 1 短跑 A/B（OFF/ON 同节点，bit-exact 对照），Level 2 全量 40 步加 `check.sh`（唯一权威门）。TwoPuncture 用缓存键 `912e370b84cec7cb` 命中，把每轮 init 从约 10 min 压到 1 min 以内，是迭代速度的关键使能器。
+OJ 最终 300.943 s、120 分满分，轨迹 RMS=0、约束最大值与重写前逐位一致。改进幅度为 -108 s（-26%），主要来自主演化从约 9.35 s/步降到约 6.98 s/步。
 
 #figure(
   table(
@@ -286,12 +282,10 @@ TwoPuncture 同时计入 CPU 与 GPU 两条评分路径。初期预分配、缩�
     [Ham max], [0.27739667], [0.27739667],
     [Px/Py/Pz max], [0.0281/0.0315/0.0265], [完全一致],
     table.hline(stroke: 1pt),
-  ), caption: [OJ 实测前后对比（sourceRevision 5b0edd5-r11）],
+  ), caption: [OJ 实测前后对比],
 )
 
-OJ 最终 300.943 s、120 分满分，轨迹 RMS=0、约束最大值与重写前逐位一致。改进幅度为 -108 s（-26%），主要来自主演化从约 9.35 s/步降到约 6.98 s/步。
-
-== 失败尝试与统一解释
+== 失败尝试
 #v(0.5em)
 
 #figure(
@@ -313,115 +307,159 @@ OJ 最终 300.943 s、120 分满分，轨迹 RMS=0、约束最大值与重写前
 
 = 任务二：ABEGPU GPU 演化优化
 
-== 热点与代码形态
+== 优化过程与热点定位
+#v(0.5em)
+最终正式源使用 CPU TwoPuncture 初值路径，GPU 只负责 BSSN 演化；真实 OJ 配置为 1 个 MPI rank、8 个 OpenMP 线程、100 个时间步。
 
-最终剖析表明 GPU 在演化阶段接近持续忙碌，数据传输只占很小部分。CUDA API 中很高的同步时间主要表示 CPU 等待 kernel，而不是同步调用本身消耗了同等 GPU 时间。优化重点应放在 kernel 内部延迟和寄存器压力，而非继续增加 stream。
+最初 `rhs_kernel` 占 GPU kernel 时间约 69%，`prolong3_kernel` 约 16.5%。`rhs_kernel` 的自然寄存器需求约 250 个/thread，`__launch_bounds__(256,2)` 将其压到 128 个寄存器，但 occupancy 只有约 21.5% 至 25%，L1TEX scoreboard stall 和 No Eligible warp 较高。这个现象说明瓶颈是数据依赖造成的等待，不是简单的显存带宽不足。
 
-#figure(
-  table(
-    columns: (auto, auto, auto, 1.35fr), align: center + horizon, stroke: none,
-    table.hline(stroke: 1pt), table.header([Kernel], [时间占比], [每步量级], [瓶颈判断]), table.hline(stroke: 0.5pt),
-    [`rhs_kernel`], [约 69%], [约 8.5 s], [128 registers、约 25% occupancy，scoreboard stall 主导],
-    [`prolong3_kernel`], [约 16%], [约 2.0 s], [大量小 kernel 与插值依赖链，单纯提高 occupancy 无效],
-    [`restrict3_kernel`], [约 5%], [约 0.6 s], [次要热点],
-    [其余分析与 RK4], [约 10%], [约 1.2 s], [单项优化空间有限],
-    table.hline(stroke: 1pt),
-  ), caption: [ABEGPU 演化时间构成],
-)
+== 迭代一：先处理初值路径和 device call
+#v(0.5em)
+=== 现象与假设
+#v(0.5em)
+早期 GPU 版本的总时间很长，但 GPU 演化本身并没有占完全部时间。进一步看调用链后发现，TwoPuncture 初值求解也被迫走了较慢的部分 GPU 路径，而 GPU 资源只有一张 A100 MIG 卡。于是我先假设：如果 TwoPuncture 改回经过验证的 CPU OpenMP 路径，就能把 GPU 留给真正适合并行的 BSSN 演化，而且不会改变物理计算。
 
-`rhs_kernel` 把导数、Christoffel 符号、Ricci 张量、演化 RHS 与约束集中在一个大 kernel 中。取消 launch bounds 后自然需求约 250 个寄存器；用 `__launch_bounds__(256,2)` 压到 128 个寄存器后可驻留两个 block，但仍有 spill。Nsight Compute 的 L1TEX scoreboard stall 约 46.6%，说明 warp 经常等待依赖数据，低 occupancy 又不足以隐藏延迟。
+同时，Nsight Compute 显示 `rhs_kernel` 中有跨翻译单元的 stencil helper 调用。这个大 kernel 的自然寄存器需求约为 250 个/thread，warp 经常在等依赖数据。我的第一个代码层面尝试是把四个热点 helper 放进 header 并强制内联，让编译器看到更完整的 load 和计算关系；随后再试安全的 branchless `fh`，减少边界分支，但保留合法地址计算。
 
-== 有效优化与机制
+=== 优化过程
+#v(0.5em)
+正式构建中设置 `AMSS_ENABLE_TWOP_GPU=OFF`，同时打开 `AMSS_ENABLE_TWOP_OMP_TUNE`、`AMSS_ENABLE_PACKED_RELAX` 和余弦表缓存，让 TwoPuncture 走 CPU 快速路径。GPU 侧把 helper 移入 header，使用 `__forceinline__`，再对 `fh` 的反射系数选择做 branchless 化。这里没有把所有判断都删除，越界风险较高的路径仍然保留 early return。
 
-#figure(
-  table(
-    columns: (1.1fr, 1.05fr, 1.65fr), align: center + horizon, stroke: none,
-    table.hline(stroke: 1pt), table.header([优化], [效果], [机制]), table.hline(stroke: 0.5pt),
-    [TwoP 构建解耦], [约节省 234 s], [使用快速 CPU OpenMP 初值路径，避免较慢的部分 GPU TwoP 路径],
-    [`__launch_bounds__(256,2)`], [早期约 19.3 降至 14.2 s/步], [以可接受 spill 换取两个 block 驻留，使 100 步进入墙钟限制],
-    [四个 stencil helper 强制内联], [端到端约降低 13.8%], [消除跨翻译单元 device call 边界，使编译器能重排 load 与计算],
-    [安全 branchless `fh`], [端到端约降低 5.5%], [减少边界判断分歧，同时保持访存地址合法],
-    table.hline(stroke: 1pt),
-  ), caption: [ABEGPU 已验证的主要优化],
-)
-
-Occupancy 是结果而不是独立目标。`(256,2)` 有效，是因为它在寄存器、spill 和驻留 block 之间取得平衡；继续压到 3 或 4 个 block 时，spill 急剧增加而变慢。强制内联并未提高 occupancy，却缩短了跨函数的串行访存依赖，这与 scoreboard stall 的诊断一致。
-
-== 关键失败尝试
+=== 验证与分析
+#v(0.5em)
+helper 内联把端到端时间从约 1266 s 降到 1052 s，branchless `fh` 又降到约 1007 s，两次都通过位级检查。这个结果说明原来的 device call 边界确实妨碍了编译器安排访存，但也说明“减少分支”本身不是充分条件，地址安全必须同时保留。CPU TwoPuncture 的解耦也成为后面所有 GPU 候选的共同基础，因为它减少了固定开销，且没有把 GPU 演化结果混入初值误差。
 
 #figure(
   table(
-    columns: (1.05fr, 1.05fr, 1.7fr), align: center + horizon, stroke: none,
-    table.hline(stroke: 1pt), table.header([尝试], [结果], [原因与教训]), table.hline(stroke: 0.5pt),
-    [512-thread block], [假快，RMS 103.2%], [寄存器文件不足使 kernel 静默 launch 失败，RHS 为零；短跑计时不能代替正确性],
-    [`launch_bounds(256,3/4)`], [慢约 10% 至 15%], [寄存器预算过低产生数 KB spill，额外 warp 无法抵消 local memory 延迟],
-    [两路拆分 RHS], [约慢 3%，后续 spill 更严重], [Ricci 段仍需大量中间量，拆分增加 scratch 和 launch，却未缩短 live set],
-    [`__ldg` 与 shared staging], [中性], [缓存命中率已经较高，问题是 load-to-use 延迟；shared memory 又引入容量和访问成本],
-    [per-stream sync], [多轮 A/B 为零], [GPU 已持续忙碌，早期收益属于节点噪声],
-    [`prolong3` occupancy 与 Z 累加重写], [完整测试为零], [依赖瓶颈不只是源码可见的 `val +=`，需要 SASS 级定位],
-    [无条件 branchless 阶数选择], [短跑快，step 28 越界], [mask 不能阻止非法 load，必须保留 early return 并钳制索引],
-    [混合 FP32], [小幅加速但 RMS 超限], [occupancy 未改善，误差在早期即超过阈值],
+    columns: (1.15fr, 1.15fr, 1.55fr), align: center + horizon, stroke: none,
+    table.hline(stroke: 1pt), table.header([改动], [实测结果], [保留理由]), table.hline(stroke: 0.5pt),
+    [TwoPuncture 改走 CPU OpenMP], [初值阶段明显缩短], [避免 GPU 资源被较慢的初值路径占用，物理检查保持通过],
+    [stencil helper `__forceinline__`], [约 1266 s 降至 1052 s], [消除跨翻译单元 device call，允许编译器重排访存和计算],
+    [安全 branchless `fh`], [约 1052 s 降至 1007 s], [减少边界分支，同时保留合法地址和 early return],
     table.hline(stroke: 1pt),
-  ), caption: [任务二失败尝试及机制分析],
+  ), caption: [ABEGPU 迭代一的改动与验证结果],
 )
 
-== 最终状态与剩余空间
+== 迭代二：拆分 RHS，并在寄存器与并行度之间找平衡
 
-正式 OJ 已记录结果为 1228.53 s、55 分，轨迹 RMS 为 0且约束通过。后续本地栈加入强制内联与 branchless `fh` 后，OJ 等效基线约 1007 s；安全修复的 branchless 阶数选择候选约 996 s并通过完整检查。它们属于不同迭代时间点，不能混作同一次正式提交。
 
-剩余时间主要位于 `rhs_kernel` 与 `prolong3_kernel`。前者需要基于 SASS/source correlation 寻找真正缩短 Ricci live set 或复用 stencil load 的结构性改写；后者可能从跨变量任务批处理、内外边界分流和相邻细网格点复用粗网格数据中获益。两类方案都必须覆盖 100 步 moving-grid 场景。
+=== 现象与假设
+#v(0.5em)
+profiling 中 `rhs_kernel` 约占 GPU kernel 时间的 69%，`prolong3_kernel` 约占 16.5%。但 `rhs_kernel` 并不是显存带宽已经跑满，而是 128 个寄存器/thread、约 21.5% 至 25% occupancy，以及较高的 L1TEX scoreboard stall 共同造成延迟。最初我以为增加驻留 block 就能隐藏等待，于是尝试改变 `launch_bounds`；结果显示，寄存器压得越低，spill 越多，反而更慢。于是新的假设变成：应先把 interior 点和 boundary/face 点分开，减少无效的边界判断，再保留一个能控制 spill 的 block 配置。
 
-= 正确性与实验方法
+=== 优化过程
+#v(0.5em)
+我把 RHS 分成 interior 和 boundary/face 路径，interior kernel 使用 `__launch_bounds__(256,2)`，face 路径单独处理对称边界。演化辅助阶段同时保留 P31 的 global interpolation 变量批处理、P32 的 Sommerfeld 紧凑发射、P33 的 `2x2x2` prolong3 tap reuse，以及 A38-1 的 fused-z 插值。此阶段的重点是减少 kernel 内部的无效工作和临时数据。
+
+=== 验证与分析
+#v(0.5em)
+Milestone B 的短 A/B 得到 `F=1.128` 并保持 bit-exact，后续 100 步检查也通过。P313233 组合的 `Program Cost` 约为 539.48 s，A38-1 fused-z 后约为 534.31 s；同一正式栈的真实 OJ 结果为 536.760 s、85.20 分。这里能看出一个容易误判的地方：SASS 指令减少和短跑加速是有意义的，但不等于正式 OJ 时间会按同样比例下降，缓存、TwoPuncture 固定成本和节点差异都会影响总数。
 
 #figure(
   table(
-    columns: (auto, 1.25fr, 1.45fr), align: center + horizon, stroke: none,
-    table.hline(stroke: 1pt), table.header([层级], [回答的问题], [局限]), table.hline(stroke: 0.5pt),
-    [Level 0], [能否构建，寄存器与 spill 是否明显恶化], [不能证明运行正确或更快],
-    [Level 1], [同节点交错短 A/B 是否有可重复收益], [不能覆盖后期 AMR 与 moving-grid],
-    [Level 2], [完整轨迹、约束和端到端时间是否通过], [最终接受依据],
+    columns: (1.15fr, 1.15fr, 1.55fr), align: center + horizon, stroke: none,
+    table.hline(stroke: 1pt), table.header([阶段], [结果], [分析]), table.hline(stroke: 0.5pt),
+    [interior/boundary split], [短 A/B `F=1.128`，100 步检查通过], [减少 interior 点上的边界判断，保留不同区域的正确地址逻辑],
+    [P313233 组合], [`Program Cost` 约 539.48 s], [global interpolation、Sommerfeld 和 prolong3 的批处理共同降低固定开销],
+    [A38-1 fused-z], [约 534.31 s，检查通过], [删除局部 `6^3` 插值数组，减少中间数据和访存压力],
+    [真实 OJ], [536.760 s，85.20 分], [与缓存运行区分，说明稳定候选仍受正式固定开销和节点状态影响],
     table.hline(stroke: 1pt),
-  ), caption: [三级验证体系],
+  ), caption: [ABEGPU 迭代二的区域拆分与辅助 kernel 优化],
 )
 
-512-thread 假加速与 branchless 越界是典型反例：二者在短测中更快，却分别因为 kernel 未执行和后期网格越界而失败。因此本实验把加速定义为相同物理输入、标准步数和完整检查下的端到端改进，而不是局部日志中的时间下降。
+== 迭代三：缩短 staged RHS 的 live range，并优化插值路径
+=== 现象与假设
+#v(0.5em)
+在前两轮之后，单纯继续调 `launch_bounds`、shared memory 或 stream 已经没有稳定收益。新的 nsys 结果显示，RHS interior 的 advection 阶段和 global interpolation 仍然值得处理。我的判断是，重复传递索引、stride、坐标和速度值会让中间量活得太久；而 `ORDN == 6` 的 global interpolation 每次都走通用 Neville 过程，固定节点下存在可消除的通用工作。
+
+=== 优化过程
+#v(0.5em)
+RHS interior 改用 staged path，把几何计算、核心演化和 advection 分开；在此基础上，direct-first 版本把一阶导数需要的参数外提，并在 advection 中直接使用 `stride/offset`，减少重复的索引元数据。global interpolation 则只在 `ORDN == 6` 时使用固定节点的五次 Lagrange 评价，其他阶数继续走原来的 `d_gi_fused` fallback。这样既利用了本题固定阶数的事实，也没有把其他插值情况一起改掉。
+
+=== 验证与分析
+#v(0.5em)
+advection 复用的同卡 A/B 中位数从 4.9409 s 降到 4.61515 s，完整缓存验证约 457.055 s，`check.sh FINAL PASS`，100/100 轨迹通过且 RMS 为 0。direct-first 组合的缓存全量结果为 338.639048 s，仍通过完整检查。最后的 GI-Lagrange6 A/B 把 Step2 中位数从 3.33000 s 降到 2.95546 s，`F=1.126728`；缓存全量验证为 305.069513 s，`check.sh FINAL PASS`。
+
+#figure(
+  table(
+    columns: (1.15fr, 1.15fr, 1.55fr), align: center + horizon, stroke: none,
+    table.hline(stroke: 1pt), table.header([改动], [实测结果], [正确性与决定]), table.hline(stroke: 0.5pt),
+    [staged RHS + advection reuse], [A/B 4.9409 s 降至 4.61515 s；全量约 457.055 s], [`check.sh FINAL PASS`，100/100 轨迹通过，保留],
+    [direct-first 组合], [缓存全量 338.639048 s], [`check.sh FINAL PASS`，作为 GI-Lagrange6 的基础，保留],
+    [GI-Lagrange6], [Step2 3.33000 s 降至 2.95546 s，`F=1.126728`；缓存全量 305.069513 s], [100 步检查通过],
+    table.hline(stroke: 1pt),
+  ), caption: [ABEGPU 迭代三的 staged RHS 与插值优化结果],
+)
+
+== 失败尝试与原因
+#v(0.5em)
+
+ #figure(
+  table(
+    columns: (1.15fr, 1.15fr, 1.65fr), align: center + horizon, stroke: none,
+    table.hline(stroke: 1pt), table.header([尝试], [结果], [原因与处理]), table.hline(stroke: 0.5pt),
+    [第一次 512-thread block], [短测快，但 RMS=103.2%], [寄存器资源不足，kernel 未正常工作，直接淘汰],
+    [`launch_bounds(256,3/4)`], [比 `(256,2)` 慢约 10% 至 15%], [寄存器预算过低，spill 到 local memory，额外 warp 无法抵消延迟],
+    [两路 RHS 拆分], [约慢 3%，spill 更严重], [增加 scratch 和 launch，却没有真正缩短 live set，关闭],
+    [`__ldg`、shared staging、load hoisting、软件流水], [中性或变慢], [RHS 是依赖等待而非简单带宽不足，新增管理和访存成本抵消收益],
+    [per-stream sync、prolong3 Z 累加重写、face launch fusion], [同卡 A/B 近中性], [没有稳定端到端收益，不保留],
+    [4x4x4 tap sharing], [出现 race 和 divergent barrier], [并行同步结构不安全，停止该方向],
+    [无条件 branchless 阶数选择], [step 28 越界], [mask 不能保护非法 load，恢复 early return 并钳制索引],
+    [混合 FP32], [局部约快 3.7%，RMS 约 0.00715], [超过 0.001 容差，关闭],
+    [A74 face 轴映射、A75 缓存隔离], [分别编译失败、quota 超限], [没有运行性能结论，记录为设置/资源失败],
+    table.hline(stroke: 1pt),
+  ), caption: [ABEGPU 失败尝试及其处理结果],
+)
+
+这些尝试说明，GPU 优化不能只看某个短测数字。512-thread 的第一次尝试看起来很快，实际因寄存器资源不足导致 kernel 没有正常工作；把 `launch_bounds` 压到 3 或 4 个 block 又引入了更多 spill。两路 RHS 拆分、shared memory staging、`__ldg`、load hoisting 和软件流水也没有得到稳定收益，原因是新增的 scratch、launch 或 local-memory 访问抵消了减少依赖的好处。
+
+其他方向同样被实测关闭：per-stream synchronization、prolong3 的 Z 累加重写、face launch fusion、不同 block shape 和过度的 tile sharing 都在同卡 A/B 中接近中性或变慢；4x4x4 tap sharing 还出现 shared-memory race 和 divergent barrier。无条件 branchless 阶数选择在短跑中较快，却在 step 28 触发越界，修复后必须保留 early return 并钳制地址。混合 FP32 只得到约 3.7% 的局部加速，trajectory RMS 约 0.00715，超过 0.001 容差，因此不能保留。A74 的 face 轴映射在编译阶段失败，A75 则因远端 home quota 超限未进入构建，这两项没有运行性能结论。
+
+== 最终结果与解读
+#v(0.5em)
+
+最终实际 OJ 记录为 **351.956766 s、102.032239 分，展示为 102/120**。100/100 个轨迹时间点和约束检查均完成，`trajectoryRMS=0`，level-0 的 Hamiltonian、三个 momentum constraint 最大值分别为 0.28974817、0.039343259、0.047298107，全部通过。
+
+从早期 1228.53 s 到最终 351.96 s，主要收益来自 CPU/GPU 初值路径解耦、RHS 的内外区域拆分、减少 device call 和 live metadata，以及把固定阶数插值改成更直接的评价。
 
 = 思考题
 
 == 思考题一：如何由 profiler 判断真正的优化对象？
+#v(0.5em)
 
-不能只按函数占比排序，还要区分计算、等待和负载不均。CPU 的 `MPI_Allreduce` wall time 很高，但逐 rank profiling 证明它主要等待承担 `global_interp` 的慢 rank，所以正确方案是 `DIST_INTERP`。GPU 的 `cudaDeviceSynchronize` 占 API 时间很高，但 kernel 时间接近 wall time且 GPU 持续忙碌，真正对象仍是 `rhs_kernel` 的 scoreboard latency。Profiler 应回答资源为何空闲，而不只是时间记在哪个符号上。
+我一开始也差点把时间最多的同步调用当成了热点。后来对照逐 rank 和 kernel 的数据才发现，CPU 的 `MPI_Allreduce` 主要是在等 `global_interp` 较慢的 rank，GPU 的 `cudaDeviceSynchronize` 主要是在等 kernel 做完。所以我现在会先思考“谁在等谁”，再决定改通信、负载还是 kernel。
 
 == 思考题二：MPI 与 OpenMP 应如何组合？
+#v(0.5em)
 
-没有跨阶段统一的最佳比例。ABE 以 30 MPI $times$ 1 OMP 最快，因为每个 rank 对应一个物理核，保留 patch 并行度并避免 SMT 争用。TwoPuncture 的红黑线没有 MPI 通信，适合单进程 OpenMP，并通过 team-hoisting 降低 fork-join。MPI 适合表达 patch 分布与跨域通信，OpenMP 适合进程内部足够粗且独立的循环，是否混合使用取决于热点粒度和通信语义。
+这次实验给我的感觉是，MPI 和 OpenMP 没有一个可以直接套用的比例。ABE 用 30 个 MPI rank、每个 rank 1 个线程比较合适，因为 patch 并行度还在，也没有 SMT 争用；TwoPuncture 的红黑线没有 MPI 通信，反而适合在一个进程里用 OpenMP。我选择并发多枚举尝试。
 
 == 思考题三：为什么提高 occupancy 可能使 GPU 更慢？
+#v(0.5em)
 
-Occupancy 只表示可驻留 warp 数。`rhs_kernel` 从 `(256,2)` 压到 `(256,3/4)` 后，寄存器预算下降，编译器把大量变量 spill 到 local memory。新增 load/store 延迟超过额外 warp 的隐藏能力，总时间反而增加。因此必须同时比较寄存器、spill、eligible warps 和 kernel 时间，不能单独追求 occupancy。
+原因是 `rhs_kernel` 的寄存器预算被压低后，变量被 spill 到 local memory，新增的读写延迟比多驻留几个 warp 带来的好处更大。
 
 == 思考题四：Shared Memory 为什么不是 stencil 的必然答案？
+#v(0.5em)
 
-Shared memory 只有在跨线程复用足够高、tile 加 halo 后仍保持合理驻留率时才有收益。ABEGPU 的 RHS 同时访问许多场，全部缓存会超过实用容量；只缓存部分 Christoffel 中间量虽减少 spill，却被 shared-memory 访问抵消。还需付出 halo 装载、bank conflict、地址计算和同步成本，因此应先定位重复率最高的字段再设计 tile。
+我原来觉得 stencil 很适合 shared memory，但这次试下来不能这么简单判断。ABEGPU 的 RHS 同时读很多场，做 tile 还要装 halo、同步和计算地址，缓存一部分 Christoffel 中间量省下的 global load 很快就被这些开销抵消了。以后如果再试，我会先量重复访问最多的字段，再决定是否值得做 tile，而不是整块数据一起搬进去。
 
 == 思考题五：怎样区分合理浮点误差和程序错误？
+#v(0.5em)
 
-首先比较完整轨迹 RMS 及其随时间的增长，再比较各 refinement level 的 Hamiltonian 与 momentum constraint，最后检查 launch error、NaN、零 RHS 和轨迹冻结。合法重排造成的误差通常平滑且远低于容差；512-thread 的冻结、FP32 的早期超限和 branchless 的非法访存都属于程序或精度策略失败。
+我会先看完整轨迹 RMS 是否随时间变大，再看各 refinement level 的 Hamiltonian 和 momentum constraint，最后查 NaN、launch error、RHS 是否全为零以及轨迹有没有冻结。比如 512-thread 那次不是误差有点大，而是 kernel 根本没有正常工作；FP32 的 RMS 也已经超过容差；branchless 版本则是后期越界。
 
 == 思考题六：为什么短跑 A/B 可能给出错误结论？
+#v(0.5em)
 
-AMR 网格和负载随演化变化，前两步不能代表全程；节点波动也会制造几个百分点的假收益，后期 moving-grid 还会触发新边界。应在同一作业交错 A/B并比较相同步号，再执行全量检查。per-stream sync 假收益和 branchless 在 step 28 崩溃都说明短跑只能筛选候选。
+短跑只能帮我筛选方向，不能直接宣布成功。AMR 网格会动，前几步的负载和后期不一样，节点波动也可能造成几个百分点的假收益。per-stream sync 看起来有收益但重复 A/B 后消失，branchless 版本则跑到 step 28 才越界，所以我会先做同一作业内交错 A/B，再用 100 步和 `check.sh` 收尾。
 
 == 思考题七：为什么端到端优化常常不是优化最显眼的 kernel？
+#v(0.5em)
 
-评分包含 TwoPuncture、初始化、主演化和分析。ABEGPU 最大单一收益来自解耦 TwoP 构建，CPU 的前中期最大收益来自消除分析 straggler，而收官收益来自 `compute_rhs_bssn_` 算法级重写（-108 s），都不是继续微调 RHS 的编译细节。前置阶段、最慢 rank 和同步边界会串行进入总时间，因此应按可消除的端到端时间排序，而不是按代码是否容易并行排序。
+这次最明显的例子是 TwoPuncture。它不是 GPU 演化的最大 kernel，却通过改成 CPU 的快速初值路径省了很多端到端时间；CPU 侧也是先处理分析阶段的 straggler，最后才做 `compute_rhs_bssn_` 的大改。我的理解是，评分看的是整条流水线，所以优化优先级应该按改动谁的效果最好来排，而不是按哪个函数最容易改来排。
 
 == 思考题八：下一步最值得验证什么？
+#v(0.5em)
 
-CPU 热点在重写前收敛到 BSSN 数据移动与 AMR 粗粒度不均衡，继续堆叠编译 flag 的预期收益低；重写后主演化已从约 9.35 s/步降到约 6.98 s/步，OJ 达到 120 分满分，剩余空间主要在更细的导数滚动窗口与边界处理。GPU 仍有 RHS 的 Ricci live set 与依赖 load，以及 `prolong3` 的大量小任务。下一步应先用 SASS/source correlation 定位 stall，再分别验证按生命周期重构 RHS 和同依赖阶段的 prolong 任务批处理；每次只改变一个变量，并用资源指标、端到端时间和完整 RMS 共同决定是否保留。
-
-= 总结
-
-CPU 路径通过 TwoPuncture、编译 flag、分布式插值与负载均衡，再以 `compute_rhs_bssn_` 的算法级重写（点态融合加 k-滚动导数融合）收尾，把 OJ 从 909.42 s、20 分提高到 300.943 s、120 分满分，轨迹 RMS 全程为 0。GPU 路径通过寄存器驻留平衡、强制内联和安全分支消除，正式记录达到 1228.53 s、55 分，后续本地栈进一步接近 1000 s。
-
-失败实验同样构成结论：更多线程、更高 occupancy、更多 shared memory 或更多 stream 都不是普适答案。CPU 侧把“数据依赖地板”误判为不可优化，直到证明编译器调度已最优而算法结构可改；GPU 侧则是逐项排除 live-set、spill 与依赖 load 的伪优化。只有把 profiler 指标还原为数据依赖、访存、负载不均和同步语义，并通过完整物理轨迹验证，性能数字才可信。
+如果继续做，我会先检查 GPU 的 face RHS 和剩余的 global interpolation，因为它们在最新剖析里还占比较高。CPU 这边已经靠 k-滚动导数融合把主演化降到约 6.98 s/步并拿到 120 分，继续堆编译 flag 的意义不大。GPU 的下一步我会先把 SASS 和源码对应起来，确认到底是 live set、依赖 load 还是小 kernel 调度在拖慢，再一次只改一个变量，最后用端到端时间和完整 RMS 决定留不留。
