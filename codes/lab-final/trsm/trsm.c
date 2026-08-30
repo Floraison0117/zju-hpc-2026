@@ -2,13 +2,6 @@
 #include <omp.h>
 #include "kblas.h"
 
-#if defined(TRSM_SME_PIPELINE) || defined(TRSM_SME_LEFT_LOOKING)
-#include "trsm_sme_candidate.h"
-#if defined(TRSM_SME_PIPELINE)
-static int trsm_sme_active_case;
-#endif
-#endif
-
 #ifdef TRSM_PROFILE
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,8 +31,17 @@ static int trsm_sme_active_case;
 #ifndef TRSM_N_SPLIT_THR
 #define TRSM_N_SPLIT_THR 4096
 #endif
-#ifndef TRSM_SME_LEFT_LOOKING_M_THRESHOLD
-#define TRSM_SME_LEFT_LOOKING_M_THRESHOLD 4097
+#ifndef TRSM_WIDE_2D
+#define TRSM_WIDE_2D 1
+#endif
+#ifndef TRSM_2D_MIN_ROWS
+#define TRSM_2D_MIN_ROWS 256
+#endif
+#ifndef TRSM_2D_MG
+#define TRSM_2D_MG 2
+#endif
+#ifndef TRSM_2D_NG
+#define TRSM_2D_NG 19
 #endif
 #ifndef TRSM_SERIAL_MINFLOP
 #define TRSM_SERIAL_MINFLOP 8388608
@@ -47,14 +49,11 @@ static int trsm_sme_active_case;
 #ifndef TRSM_W
 #define TRSM_W 32
 #endif
-#ifndef TRSM_KBLAS_THREADS
-#define TRSM_KBLAS_THREADS 1
-#endif
 
 __attribute__((constructor))
 static void trsm_force_serial_kblas(void)
 {
-    BlasSetNumThreads(TRSM_KBLAS_THREADS);
+    BlasSetNumThreads(1);
 }
 
 #ifdef TRSM_PROFILE
@@ -86,36 +85,18 @@ static FILE* trsm_profile_stream(void)
     }
     if (!trsm_profile_headers_written) {
         fprintf(trsm_profile_fp,
-                "case,version,level_or_step,m,n,k,nb,kernel,instruction_path,"
-                "active_threads,pack_a_ms,pack_b_ms,kernel_ms,gemm_ms,solve_ms,"
-                "barrier_ms,fork_ms,join_ms,min_thread_ms,max_thread_ms,"
-                "bytes_packed,flops,gflops\n");
+                "case,level_or_step,m,n,k,active_threads,gemm_ms,solve_ms,"
+                "barrier_ms,min_thread_ms,max_thread_ms\n");
+        fprintf(trsm_profile_fp,
+                "# thread_case,level_or_step,tid,m,n,k,actual_flops,gemm_ms\n");
+        fprintf(trsm_profile_fp,
+                "# region_case,level_or_step,m,n,k,active_threads,region_ms,"
+                "fork_ms,barrier_ms,join_ms,max_thread_ms\n");
+        fprintf(trsm_profile_fp,
+                "# step_case,step,remaining,active_threads,nb,gemm_ms,barrier_ms\n");
         trsm_profile_headers_written = 1;
     }
     return trsm_profile_fp;
-}
-
-static void trsm_profile_emit_row(const char* version, const char* level,
-                                  int m, int n, int k, int nb,
-                                  const char* kernel, const char* path,
-                                  int active_threads,
-                                  double pack_a_ms, double pack_b_ms,
-                                  double kernel_ms, double gemm_ms,
-                                  double solve_ms, double barrier_ms,
-                                  double fork_ms, double join_ms,
-                                  double min_thread_ms, double max_thread_ms,
-                                  size_t bytes_packed, double flops)
-{
-    FILE* fp = trsm_profile_stream();
-    const double gflops = kernel_ms > 0.0 ? flops / (kernel_ms * 1e6) : 0.0;
-    fprintf(fp,
-            "%d,%s,%s,%d,%d,%d,%d,%s,%s,%d,"
-            "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-            "%.6f,%.6f,%llu,%.0f,%.3f\n",
-            trsm_profile_case, version, level, m, n, k, nb, kernel, path,
-            active_threads, pack_a_ms, pack_b_ms, kernel_ms, gemm_ms,
-            solve_ms, barrier_ms, fork_ms, join_ms, min_thread_ms,
-            max_thread_ms, (unsigned long long)bytes_packed, flops, gflops);
 }
 
 static void trsm_profile_begin(int m, int n)
@@ -141,14 +122,10 @@ static void trsm_profile_emit_summary(int kind, int index,
 {
     char label[32];
     trsm_profile_label(label, sizeof(label), kind, index);
-    trsm_profile_emit_row("V9", label, m, n, k, 0,
-                          kind == 2 ? "solve" : "update",
-                          kind == 2 ? "scalar" : "KBLAS",
-                          active_threads, 0.0, 0.0,
-                          gemm_ms > 0.0 ? gemm_ms : solve_ms,
-                          gemm_ms, solve_ms, barrier_ms, 0.0, 0.0,
-                          min_thread_ms, max_thread_ms, 0,
-                          (double)2 * m * n * k);
+    FILE* fp = trsm_profile_stream();
+    fprintf(fp, "%d,%s,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+            trsm_profile_case, label, m, n, k, active_threads,
+            gemm_ms, solve_ms, barrier_ms, min_thread_ms, max_thread_ms);
 }
 
 static void trsm_profile_emit_region(int kind, int index,
@@ -159,10 +136,10 @@ static void trsm_profile_emit_region(int kind, int index,
 {
     char label[32];
     trsm_profile_label(label, sizeof(label), kind, index);
-    trsm_profile_emit_row("V9", label, m, n, k, 0, "region", "runtime",
-                          active_threads, 0.0, 0.0, region_ms, region_ms,
-                          0.0, barrier_ms, fork_ms, join_ms, 0.0,
-                          max_thread_ms, 0, 0.0);
+    FILE* fp = trsm_profile_stream();
+    fprintf(fp, "region,%s,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+            label, m, n, k, active_threads,
+            region_ms, fork_ms, barrier_ms, join_ms, max_thread_ms);
 }
 
 static void trsm_profile_emit_thread(int kind, int index, int tid,
@@ -170,23 +147,18 @@ static void trsm_profile_emit_thread(int kind, int index, int tid,
 {
     char label[32];
     trsm_profile_label(label, sizeof(label), kind, index);
-    (void)tid;
-    trsm_profile_emit_row("V9", label, stat->m, stat->n, stat->k, 0,
-                          "thread", "runtime", 1, 0.0, 0.0,
-                          stat->work_ms, stat->work_ms, 0.0, 0.0, 0.0,
-                          0.0, stat->work_ms, stat->work_ms, 0,
-                          (double)stat->flops);
+    FILE* fp = trsm_profile_stream();
+    fprintf(fp, "thread,%s,%d,%d,%d,%d,%lld,%.6f\n",
+            label, tid, stat->m, stat->n, stat->k,
+            stat->flops, stat->work_ms);
 }
 
 static void trsm_profile_emit_step(int step, int remaining, int active_threads,
                                    int nb, double gemm_ms, double barrier_ms)
 {
-    char label[32];
-    (void)snprintf(label, sizeof(label), "step%d", step);
-    trsm_profile_emit_row("V9", label, remaining, 0, 0, nb, "step",
-                          "runtime", active_threads, 0.0, 0.0, gemm_ms,
-                          gemm_ms, 0.0, barrier_ms, 0.0, 0.0, 0.0,
-                          gemm_ms, 0, 0.0);
+    FILE* fp = trsm_profile_stream();
+    fprintf(fp, "step,%d,%d,%d,%d,%.6f,%.6f\n",
+            step, remaining, active_threads, nb, gemm_ms, barrier_ms);
 }
 
 #endif
@@ -197,9 +169,6 @@ static void solve_diag_block(int bs, int n, int ii,
 {
     const int W = (n <= 1024) ? 16 : 32;
     if (bs <= 0 || n <= 0) return;
-#ifndef TRSM_PROFILE
-    (void)profile_index;
-#endif
 
 #ifdef TRSM_PROFILE
     trsm_profile_thread stats[TRSM_PROFILE_MAX_THREADS];
@@ -303,23 +272,6 @@ static void dgemm_update(int rows, int n, int bs,
                          int profile_kind, int profile_index)
 {
     if (rows <= 0 || n <= 0) return;
-#ifndef TRSM_PROFILE
-    (void)profile_kind;
-    (void)profile_index;
-#endif
-
-#if defined(TRSM_SME_PIPELINE) && defined(TRSM_SME_CASE3) && \
-    !defined(TRSM_KBLAS_INTERNAL)
-    if (trsm_sme_active_case == 3 &&
-        trsm_sme_case3_update(rows, n, bs, L21, lda, Bi, ldb, B2, ldb2))
-        return;
-#elif defined(TRSM_SME_PIPELINE) && defined(TRSM_SME_CASE2) && \
-      !defined(TRSM_KBLAS_INTERNAL)
-    if (trsm_sme_active_case == 2 &&
-        trsm_sme_case2_update(rows, n, bs, L21, lda, Bi, ldb, B2, ldb2))
-        return;
-#endif
-
     if ((double)rows * n * bs < TRSM_SERIAL_MINFLOP) {
 #ifdef TRSM_PROFILE
         const double gemm_start = omp_get_wtime();
@@ -340,21 +292,39 @@ static void dgemm_update(int rows, int n, int bs,
         return;
     }
 
-#ifdef TRSM_KBLAS_INTERNAL
-    /* KBLAS owns the full parallel DGEMM region in this isolated
-     * experiment; the default V9 path remains outer-OpenMP plus one thread. */
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                rows, n, bs, -1.0, L21, lda,
-                Bi, ldb, 1.0, B2, ldb2);
-    return;
-#endif
-
 #ifdef TRSM_PROFILE
     trsm_profile_thread stats[TRSM_PROFILE_MAX_THREADS];
     const double region_start = omp_get_wtime();
     int observed_threads = 0;
 #endif
     if (n > TRSM_N_SPLIT_THR) {
+#if TRSM_WIDE_2D
+        if (rows >= TRSM_2D_MIN_ROWS) {
+            /* 2D split: TRSM_2D_MG row groups x TRSM_2D_NG col groups.
+             * Probe evidence (split2d): 2x19 beats pure N-split by 9-15% on
+             * the Case2 tree update shapes (fat-row panels reuse B better). */
+#pragma omp parallel
+            {
+                const int t = omp_get_thread_num();
+                const int mg = TRSM_2D_MG, ng = TRSM_2D_NG;
+                const int rg = t / ng, cg = t % ng;
+                if (rg < mg) {
+                    const int r0 = (int)((long)rows * rg / mg);
+                    const int r1 = (int)((long)rows * (rg + 1) / mg);
+                    const int c0 = (int)((long)n * cg / ng);
+                    const int c1 = (int)((long)n * (cg + 1) / ng);
+                    if (r1 > r0 && c1 > c0) {
+                        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                                    r1 - r0, c1 - c0, bs,
+                                    -1.0, L21 + (size_t)r0 * lda, lda,
+                                    Bi + c0, ldb,
+                                    1.0, B2 + (size_t)r0 * ldb2 + c0, ldb2);
+                    }
+                }
+            }
+            return;
+        }
+#endif
 #pragma omp parallel
         {
             const int t = omp_get_thread_num();
@@ -522,46 +492,6 @@ static void trsm_blocked(int m, int n, int nb,
     }
 }
 
-#ifdef TRSM_SME_LEFT_LOOKING
-
-/*
- * Case-3 left-looking schedule.  Once block ii is reached, all rows above
- * it have already been solved.  Update this block from those rows, then
- * solve its diagonal block.  The candidate writes only the current B block,
- * avoiding the repeated read/modify/write traffic of right-looking updates.
- */
-static void trsm_blocked_left_looking_sme(int m, int n, int nb,
-                                          const double* L, int lda,
-                                          double* B, int ldb)
-{
-    for (int ii = 0; ii < m; ii += nb) {
-        int bs = nb;
-        if (ii + bs > m) bs = m - ii;
-
-        if (ii > 0) {
-            const double* lblock = L + (size_t)ii * (size_t)lda;
-            double* c = B + (size_t)ii * (size_t)ldb;
-#ifndef TRSM_SME_LEFT_LOOKING_KBLAS_ONLY
-            if (!trsm_sme_case3_left_update(bs, n, ii,
-                                            lblock, lda, B, ldb,
-                                            c, ldb)) {
-                cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                            bs, n, ii, -1.0, lblock, lda,
-                            B, ldb, 1.0, c, ldb);
-            }
-#else
-            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                        bs, n, ii, -1.0, lblock, lda,
-                        B, ldb, 1.0, c, ldb);
-#endif
-        }
-
-        solve_diag_block(bs, n, ii, L, lda, B, ldb, ii / nb);
-    }
-}
-
-#endif
-
 #ifdef TRSM_PERSISTENT_TEAM
 
 /*
@@ -660,18 +590,8 @@ static void trsm_blocked_persistent(int m, int n, int nb,
 void l_trsm(int m, int n, const double* L, int lda, double* B, int ldb)
 {
     if (m <= 0 || n <= 0) return;
-#ifdef TRSM_SME_PIPELINE
-    trsm_sme_active_case = (m <= 1024) ? 1 : ((m <= 4096) ? 2 : 3);
-#endif
 #ifdef TRSM_PROFILE
     trsm_profile_begin(m, n);
-#endif
-#ifdef TRSM_SME_LEFT_LOOKING
-    if (m >= TRSM_SME_LEFT_LOOKING_M_THRESHOLD &&
-        n <= TRSM_N_SPLIT_THR) {
-        trsm_blocked_left_looking_sme(m, n, TRSM_NB3, L, lda, B, ldb);
-        return;
-    }
 #endif
 #ifdef TRSM_PERSISTENT_TEAM
     if (m >= TRSM_PERSISTENT_M_THRESHOLD && n <= TRSM_N_SPLIT_THR) {

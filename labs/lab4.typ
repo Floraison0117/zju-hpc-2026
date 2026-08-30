@@ -183,9 +183,27 @@ TwoPuncture 同时计入 CPU 与 GPU 两条评分路径。初期预分配、缩�
     [`NRELAX` 减半], [单次迭代变快，总时间不变], [预条件减弱导致 BiCGStab 迭代增加，局部收益被收敛变慢抵消],
     [OpenMP 并行 `J_times_dv`], [无收益], [函数占比低且逐点部分受带宽限制，优化了非主导阶段],
     [`Derivatives_AB3` 并行], [NaN 或异常退出], [余弦表懒初始化与 scratch 生命周期不具备线程安全性],
-    [局部 GPU 化 TwoP], [仅小幅改善，慢于最终 CPU OpenMP], [传输、同步和仍留 CPU 的 `relax` 决定端到端时间],
+    [局部 GPU 化 TwoP], [仅小幅改善，慢于最终 CPU OpenMP], [后确诊主因为 GPU 分支跳过 `Derivatives_AB3`，`J*dv` 用零导数而发散，修复见下节],
     table.hline(stroke: 1pt),
   ), caption: [TwoPuncture 失败尝试汇总],
+)
+
+== GPU 路径的正确性修复
+#v(0.5em)
+
+实验后期补测 `AMSS_ENABLE_TWOP_GPU=ON` 的独立求解时发现，GPU 路径的问题不是慢，而是数学上发散：BiCGStab 残余从初期的 1e-1 量级一路爆到 1e+107，CPU 同工况则一步收敛到 3.1e-13。检查调用链后定位到 `TwoPunctures::J_times_dv` 的 GPU 分支：它在调用 `gpu_J_times_dv` 后直接返回，跳过了 CPU 路径会先执行的 `Derivatives_AB3`。GPU kernel 消费 `dv.d1` 至 `dv.d33` 的谱导数，而这些字段从未被写入，于是实际施加的 Jacobian 导数项全为零，Newton 与裸质量迭代空转。
+
+修复只有一行：在 GPU 调用前补上 `Derivatives_AB3(nvar, n1, n2, n3, dv)`。改动位于 `#ifdef USE_GPU` 内，CPU 构建不受任何影响；用 `g++ -E -P` 对比确认，无 `USE_GPU` 时修复前后源码的预处理器输出逐字节一致。
+
+#figure(
+  table(
+    columns: (1.15fr, 1fr, 1.2fr), align: center + horizon, stroke: none,
+    table.hline(stroke: 1pt), table.header([配置（同节点 16 核）], [独立求解], [收敛情况]), table.hline(stroke: 0.5pt),
+    [CPU 路径（`TWOP_GPU=OFF`）], [34.2 s], [Newton it=1，|F|=3.1e-13],
+    [GPU 路径（修复前）], [大于 13 min，人工取消], [残余爆到 1e+107，发散],
+    [GPU 路径（修复后）], [34.4 s / 34.1 s], [Newton it=1，|F|=2.4e-13],
+    table.hline(stroke: 1pt),
+  ), caption: [TwoPuncture GPU 路径修复前后的独立求解对比],
 )
 
 = 任务一：ABE CPU 演化优化

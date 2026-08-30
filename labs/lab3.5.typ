@@ -45,8 +45,10 @@
 = 实验目标
 #v(0.5em)
 
-本实验在华为昇腾 910B4 NPU 上实现并优化融合算子 FusedAddRmsNorm。官方评测 `Task Duration = 6.02 us`，
-得分 #strong[76/120]，相对 baseline 加速 #strong[2.49 倍]。
+本实验在华为昇腾 910B4 NPU 上实现并优化融合算子 FusedAddRmsNorm。官方评测（V13 提交）
+`Task Duration = 6.02 us`，得分 #strong[76/120]，相对 baseline 加速 #strong[2.49 倍]。
+在此基础上我们进行了第二轮冲刺（V14-V30），交付 V28c：本地中位 6.06 us，
+并用受控实验论证了满分在本环境被结构性封顶（详见后文地板分解）。
 
 = 算子语义与硬件背景
 #v(0.5em)
@@ -227,28 +229,87 @@ MTE2 1.51 us，MTE3 约 0.26 us。
   caption: [各版本 msprof 中位流水时间],
 )
 
-== 最终实现的数据流（V13）
+== 最终实现的数据流（V28c）
 #v(0.5em)
 
-对齐批量路径（$H % 16 == 0$ 且 $H <= 4096$）的最终数据流：
+对齐批量路径（$H$ 为 16 的倍数且 $H <= 4096$）的最终数据流：
 
 #codeblock[
 ```text
+tiling 直读（5 次标量 GM 读，替代 GET_TILING_DATA 宏）
 GM x/residual →(2 条多块 DataCopy, blockCount=n, blockLen=H/16) → inBuf(F16, x|res)
-  → Cast x32 | Cast res32（存入 rFp32 备用半区）→ Add → R32（覆盖 x32 区）
-  → Cast → residual_out（F16 chunk 缓冲）
-  → Mul sq = R^2 → per-row Block/WholeReduceSum → sumSqArr[row*8]
+  → Add(F16) → residual_out（F16 chunk 缓冲；FP16 加法与 golden 位级一致）
+  → Cast → R32 → Mul sq = R^2
+  → per-row 跨步 Add 折叠到行首 64 lane → 一次批量 WholeReduceSum → sumSqArr[row]
   → 1 次 V→S 同步 → per-row 标量 rstd = 1/sqrt(sumSq*invH+eps)
   → per-row Muls(R, rstd); Mul(R, weight) → chunk 宽 Cast → y
   → residual_out、y 各 1 条多块 DataCopy 写回 GM
 ```
 ]
 
-同步设计：weight 拷贝首条发出 + 紧邻 Set/Wait(MTE2_V) + Cast（不在 phase A 关键
-路径上）；chunk 数据拷贝后 Set/Wait(MTE2_V)；规约后一次 V→S；输出前紧邻
-Set/Wait(V_MTE3)；多 chunk 时 chunk 边界 Set/Wait(MTE3_V) 与 V_MTE2 保护单缓冲
-复用。精度保持全程 FP32 + 标量 rstd，最大相对误差由最终 FP16 舍入边界翻转决定，
-理论有界 9.77e-4，恒小于 1e-3。
+weight 拷贝与 chunk 输入共用一个 MTE2_V 事件（其 Cast 在 phase A 后发出，
+远早于 phase B 首次读取）；chunk 数据拷贝后 Set/Wait(MTE2_V)；规约后一次
+V→S；输出前紧邻 Set/Wait(V_MTE3)；多 chunk 时 chunk 边界 Set/Wait(MTE3_V)
+与 V_MTE2 保护单缓冲复用。非对齐 $H <= 4096$ 的 shape 走 chunked 两遍流式
+路径，$H > 4096$ 同样。精度保持 y 全程 FP32 + 标量 rstd，最大相对误差由最终
+FP16 舍入边界翻转决定，理论有界 9.77e-4，恒小于 1e-3。
+
+= 第二轮冲刺：评分曲线复核与地板分解（V14-V30）
+#v(0.5em)
+
+在 76 分的基础上，我们针对“满分还需要多快”做了两件事：重新标定评分曲线，
+并用受控实验把 Task Duration 分解为三部分。
+
+== 评分曲线的像素级重拟合
+#v(0.5em)
+
+对课程 score.png 的全部曲线点做最小二乘拟合，得
+
+$ "score"(T) = 81 ln(15.2 / T), $
+
+其中 $T$ 为 case 2 的 msprof Task Duration（us），拟合 RMSE 为 0.91 分。验证：
+$T = 6.02$ us 对应 75 分，与官方 76 分在量化误差内一致。由曲线：100 分对应
+4.42 us，#strong[120 分对应 3.45 us]。
+
+== Task Duration 的地板分解
+#v(0.5em)
+
+三个受控实验（相邻 job 交替测量，消除设备状态漂移）：
+
++ #strong[分派地板]：纯 return 的空 kernel（.o 约 6 KiB）Task 稳定在
+  2.40-2.62 us，且在相隔 5 小时的两个时段复测一致；
++ #strong[tiling 首读]：读一次 tiling 字段后立即 return（真实二进制，
+  10-18 KiB 任意大小）为 3.30-3.52 us。即首次 GM 标量读约 0.9 us 的 HBM 延迟
+  完全暴露在关键路径上（后续字段读命中 L2，几乎免费）；
++ #strong[二进制大小假设否定]：6.1 / 10.2 / 18.5 KiB 三种大小的内核地板
+  相同，代码体积不是地板的成因；
++ #strong[计算 body]：完整 kernel 5.9-6.1 us，即 body 约 2.5 us。
+
+因此 #strong[Task = 分派 2.48 + tiling 首读 0.9 + body 约 2.5]。120 分阈值
+3.45 us 在此地板上只剩约 0.07 us 计算预算，任何正确实现都无法达到；100 分
+（4.42 us）要求 body 压到 1.04 us 以下，而 V13 的 V 流水线有效计算时间就有
+1.52 us（V22b 降为 1.19 us），仅指令发射开销已超出预算。本环境的现实上限
+约为 85-90 分。
+
+== 保留到最终版的修改（V20-V28）
+#v(0.5em)
+
++ #strong[fold + 批量规约（V20）]：仿 CANN LayerNorm 的 `LayerNormReduceSumImpl`，
+  每行用一条跨步 `Add`（dstRepStride=0 累加）把平方和折叠到行首 64 lane，
+  再用一次 `WholeReduceSum`（repeatTime=行数，dstRepStride=1 元素）打包产出
+  全部行的 sumSq，替换 V13 每行两条 BlockReduceSum + 一条 WholeReduceSum
+  加四次 mask API 的链路；
++ #strong[直读 tiling（V21）]：用 5 次标量 GM 读替代框架 `GET_TILING_DATA`
+  宏。宏内部走 MTE2 → UB → 两次跨流水事件 → 栈拷贝，标定显示贵约 1.1 us；
++ #strong[fp16 Add 产出 residual_out（V22b）]：两个 FP16 之和在 FP32 中精确、
+  再舍入回 FP16 与 FP16 加法语义位级一致，故直接在 FP16 上做加法即得
+  residual_out（golden 同值），再 Cast 上来供后续计算。vec 流水时间从
+  1.52 降到 1.19 us；
++ #strong[weight 并入输入事件（V28a）]：weight 拷贝与 chunk 输入共用一个
+  MTE2_V 事件，省一对 Set/Wait；
++ #strong[删除 whole-row 路径（V28b/c）]：非对齐 $H <= 4096$ 的 shape 改走
+  chunked 两遍流式路径（只影响非计分 shape 的性能，不影响正确性），
+  精简结构。
 
 = 尝试过但未采用的方案
 #v(0.5em)
@@ -265,11 +326,32 @@ Set/Wait(V_MTE3)；多 chunk 时 chunk 边界 Set/Wait(MTE3_V) 与 V_MTE2 保护
   以重叠 MTE2 与 phase B，5 case 全过但 6.50 us，队列簿记开销大于重叠收益，回退。
 + 多 tile 手动管线（V10/V14/V15/V18/V19）：目标是把 MTE2 藏到 V 下面以逼近
   5.08 us（90 分），但多 tile 结构在 CANN 8.5.0 下反复出现 vector core timeout。
-  诊断：事件 flag 为"一次 Set 只能被一次 Wait 消费"的语义，且 `FetchEventID`
+  诊断：事件 flag 为“一次 Set 只能被一次 Wait 消费”的语义，且 `FetchEventID`
   与 TQue 内部事件共享从 0 开始的 ID 池，手动事件与队列事件发生 FLAGID 冲突
   （simulator 指令流显示内核末尾存在一个等不到 MTE2→V flag 0 的 V 等待）。
   由于无法静态验证编译器 auto-sync 与手动事件的全部交互，最终放弃多 tile 管线，
   采用稳定的单 chunk 结构。
++ 纯 FP16 y 路径（V22）：`y` 的三个 FP16 舍入叠加后最大相对误差约 2.4e-3，
+  超出 1e-3 容限，4 个公开 case FAIL，精度拒绝。
++ BlockReduceSum 树（V26）：设想用两条 BlockReduceSum 加一条多 repeat
+  WholeReduceSum 共三条指令完成整 chunk 规约。单行 chunk 正确，但多行打包
+  （srcRepStride 不足 8 block）时硬件读错：B=64 时奇数行的 sumSq 恰好多出约
+  1/17 个 partial（simulator 复现）。结论：多 repeat WholeReduceSum 要求
+  srcRepStride 至少 8 block（一行满 repeat），折叠到 16 lane 再打包读取不合法。
++ wTile 广播（V27）：用 UB→UB DataCopy（srcStride=0）把 weight 复制成 n 行，
+  使逐行权重乘法合并为一条 chunk 宽指令。但 srcStride=0 的语义是“块间无间隔”
+  即连续读取而非重读，目的缓冲越界，H=1024 碰巧相邻内存合法而通过，H=512 时
+  读到垃圾（行 0 正确、行 1-7 全错），拒绝。
++ 投机预取流水（V30）：在读取 tiling 之前以猜测布局（每核第 8k 行起 8 行、
+  H=1024）先把 x/residual/weight 投机搬入 UB，便 tiling 首读的 0.9 us 延迟与
+  MTE2 流水重叠；猜测命中则免拷贝，未命中则重拷。计分 shape 快路径生效，但
+  对小张量的越界读依赖相邻虚拟内存恰好映射，出现与布局相关的随机损坏与
+  偶发 ERR99999 异常（同 shape 单独跑通过、顺序跑失败），越界读不安全，拒绝。
+  并目发现 MTE2 读侧无 MMU 边界检查不等于读越界无害。
++ 两半软件流水（V24）：把 chunk 拆两半先发全部加载再计算，5 case 全过但
+  无收益（约 6.0 us）：两段粒度太粗，填充与排空吃掉重叠收益。
++ blockDim=40（V28c 下复测）：中位 6.40 vs 32 核的 5.98 us，负载不均
+  （256 行/40 核）且分派更贵，维持 32。
 
 = 最终结果
 #v(0.5em)
@@ -286,21 +368,29 @@ $B=1$ 单核、极小 H=3/8、$[-1000, 1000]$ 大范围数据），全部 PASS�
 == 性能
 #v(0.5em)
 
-最终版本 case 2 的 5 个新样本：5.90, 6.28, 6.60, 6.46, 6.10 us，中位 #strong[6.28 us]，
-范围 5.90-6.60。官方 OJ 评测 `Task Duration = 6.02 us`，得分 #strong[76/120]。
+最终版本 V28c（第二轮冲刺后的交付版）case 2 的最新 5 个样本：5.84, 6.32, 6.06,
+6.08, 6.04 us，中位 #strong[6.06 us]，单次 profile 5.96 us。官方 OJ 评测
+（V13 提交）`Task Duration = 6.02 us`，得分 #strong[76/120]；V28c 相对 V13
+本地中位低约 0.2 us，按评分曲线换算约 78-80 分。
+
+结合地板分解，满分在本环境不可达：分派 2.48 us 加 tiling 首读 0.9 us 共
+3.38 us 的硬地板已仅比 120 分阈值低 0.07 us，而规约、rstd 与逐行缩放的串行
+计算链是算法必需。相对 baseline 的加速比为 15.01/6.06 = #strong[2.48 倍]
+（官方口径 6.02 us 对应 2.49 倍）。
 
 #figure(
   table(
-    columns: (auto, auto, auto, auto),
+    columns: (auto, auto, auto, auto, auto),
     align: left + horizon,
     stroke: none,
     table.hline(stroke: 1pt),
-    table.header([指标], [基线 V0], [最终 V13], [说明]),
+    table.header([指标], [基线 V0], [V13], [最终 V28c], [说明]),
     table.hline(stroke: 0.5pt),
-    [正确性], [5/5], [5/5 + 22 隐藏 PASS], [官方评测通过],
-    [case2 中位 / us], [15.01], [6.28], [本机 `checker/profile.sh`],
-    [官方 Task / us], [约 15], [6.02], [OJ 评测 `513c599c-r7`],
-    [官方得分], [0], [76/120], [课程评分曲线],
+    [正确性], [5/5], [5/5 + 22 隐藏 PASS], [5/5 + 22 隐藏 PASS], [本地验证],
+    [case2 中位 / us], [15.01], [6.28], [6.06], [本机 `checker/profile.sh`],
+    [vec 流水 / us], [2.7], [1.52], [1.19], [msprof PipeUtilization],
+    [官方 Task / us], [约 15], [6.02], [待重新提交], [OJ 评测 `513c599c-r7`],
+    [官方得分], [0], [76/120], [待重新提交], [课程评分曲线],
     table.hline(stroke: 1pt),
   ),
   caption: [最终结果汇总],

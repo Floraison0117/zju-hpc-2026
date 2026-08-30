@@ -145,13 +145,10 @@ public:
         if (this->startRow >= this->endRow) return;
         if (this->hiddenSize <= 0) return;
 
-        // V28b: the whole-row path is removed for code size (binary size
-        // measurably inflates the launch floor; see experiment log §10).
-        // Misaligned H that fits one tile now streams through the chunked
-        // path (one chunk per row, two passes). Those shapes only affect
-        // correctness, not the scored case 2.
         if (this->useBatch) {
             ProcessAlignedBatch();
+        } else if (this->alignedHidden <= this->tileElems) {
+            ProcessWholeRows();
         } else {
             ProcessChunkedRows();
         }
@@ -182,10 +179,6 @@ private:
         const float invH = 1.0f / static_cast<float>(H);
         const int32_t chunk = this->rowsPerChunk;
 
-        // Multi-block DataCopy params for one chunk of `n` contiguous rows:
-        // rows are contiguous in GM, so blockLen*blockCount == n*alignedHidden.
-        // For H = 4096, alignedHidden/16 = 256 > 255 (blockLen cap), so split
-        // each row into two 128-block copies.
         int32_t blocksPerRow = alignH / ALIGN_NUM;       // 32B blocks per row
         AscendC::DataCopyParams copyParams;
         copyParams.srcStride = 0;
@@ -206,45 +199,71 @@ private:
             uint32_t chunkElems = static_cast<uint32_t>(n) * static_cast<uint32_t>(alignH);
             copyParams.blockCount = static_cast<uint16_t>(blocksPerRow <= 255 ? n : 2 * n);
 
-            // ---- CopyIn: x and residual for `n` rows (one DataCopy each).
-            // The weight copy is issued once per core with its own MTE2_V
-            // event (EVENT_ID5) and immediately waited ONCE (flags are
-            // consume-on-wait, so a Set-once/Wait-many pattern would hang on
-            // multi-chunk shapes); the weight load never gates phase A.
-            // V28a: the weight copy rides the SAME MTE2_V event as the chunk
-            // inputs (one fewer Set/Wait pair on the critical path; the small
-            // Cast runs on the V pipe right after phase A, well before phase B
-            // first reads weightFp32).
+            // V24: split the chunk into two halves; issue BOTH loads up front
+            // so MTE2 streams them back-to-back, then compute half0 while
+            // MTE2 finishes half1. Halves are contiguous sub-ranges of the
+            // same buffers. Odd n puts the extra row in half0.
+            const bool split = (n >= 2);
+            const int32_t n0 = split ? ((n + 1) / 2) : n;
+            const int32_t n1 = split ? (n - n0) : 0;
+            const uint32_t e0 = static_cast<uint32_t>(n0) * static_cast<uint32_t>(alignH);
+            const uint32_t e1 = static_cast<uint32_t>(n1) * static_cast<uint32_t>(alignH);
+
+            // V25: weight rides the SAME MTE2 event as the chunk inputs (one
+            // fewer Set/Wait pair on the critical path; the 2 KB cast runs on
+            // the V pipe right after the input Add chain, well before its
+            // first use in phase B).
             if (rowBase == 0) {
                 AscendC::DataCopy(wHalf, weightGm[0], static_cast<uint32_t>(H));
             }
-            AscendC::DataCopy(inLocal, xGm[gmBase], copyParams);
-            AscendC::DataCopy(inLocal[static_cast<uint32_t>(n) * static_cast<uint32_t>(alignH)],
-                              residualGm[gmBase], copyParams);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
 
-            // ---- Phase A (chunk-wide): rows are contiguous in UB, so the
-            // per-row elementwise chain (Cast/Cast/Add/Cast/Mul) becomes ONE
-            // op over n*alignH elements. res32 is staged in the spare half of
-            // rFp32 (region [nA, 2nA)), then folded into R in [0, nA). ----
-            AscendC::Add(resOutT, inLocal,
-                         inLocal[static_cast<uint32_t>(n) * static_cast<uint32_t>(alignH)],
-                         chunkElems);
-            AscendC::Cast(rFp32, resOutT, AscendC::RoundMode::CAST_NONE, chunkElems);
-            AscendC::Mul(sq, rFp32, rFp32, chunkElems);
+            AscendC::DataCopyParams halfParams = copyParams;
+            halfParams.blockCount = static_cast<uint16_t>(blocksPerRow <= 255 ? n0 : 2 * n0);
+            AscendC::DataCopy(inLocal, xGm[gmBase], halfParams);
+            AscendC::DataCopy(inLocal[e0], residualGm[gmBase], halfParams);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            if (split) {
+                AscendC::DataCopyParams half1Params = copyParams;
+                half1Params.blockCount = static_cast<uint16_t>(blocksPerRow <= 255 ? n1 : 2 * n1);
+                AscendC::DataCopy(inLocal[2u * e0],
+                                  xGm[gmBase + static_cast<uint64_t>(n0) * static_cast<uint64_t>(H)],
+                                  half1Params);
+                AscendC::DataCopy(inLocal[2u * e0 + e1],
+                                  residualGm[gmBase + static_cast<uint64_t>(n0) * static_cast<uint64_t>(H)],
+                                  half1Params);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
+            }
+
+            // ---- Phase A on half 0 ----
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            AscendC::Add(resOutT, inLocal, inLocal[e0], e0);
+            AscendC::Cast(rFp32, resOutT, AscendC::RoundMode::CAST_NONE, e0);
+            AscendC::Mul(sq, rFp32, rFp32, e0);
             if (rowBase == 0) {
                 AscendC::Cast(weightFp32, wHalf, AscendC::RoundMode::CAST_NONE, alignH);
             }
-            // Per-row reduce, CANN LayerNorm style: fold each row's squares
-            // into its first 64 lanes with ONE strided Add per row (dst==src1,
-            // dstRepStride=0 accumulates; src0 advances 64 elems/repeat), then
-            // ONE batched WholeReduceSum over all n folded rows. This replaces
-            // the per-row ReduceNormal chain (2x BlockReduceSum + WRS + 4 mask
-            // API calls per row) with ~2 API calls per row + 1 shared call,
-            // removing most of the scalar-unit mask-setup cost.
-            const int32_t foldSegs = H >> 6;           // 64-elem segments per row
-            const int32_t foldTail = H & 63;           // tail beyond 64*k
+
+            // Early residual_out copy for half 0: MTE3 streams it out while V
+            // still works on half 1.
+            if (split) {
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+                AscendC::DataCopyParams outH0 = copyParams;
+                outH0.blockCount = static_cast<uint16_t>(blocksPerRow <= 255 ? n0 : 2 * n0);
+                AscendC::DataCopy(residualOutGm[gmBase], resOutT, outH0);
+            }
+
+            // ---- Phase A on half 1 ----
+            if (split) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
+                AscendC::Add(resOutT[e0], inLocal[2u * e0], inLocal[2u * e0 + e1], e1);
+                AscendC::Cast(rFp32[e0], resOutT[e0], AscendC::RoundMode::CAST_NONE, e1);
+                AscendC::Mul(sq[e0], rFp32[e0], rFp32[e0], e1);
+            }
+
+            // ---- Per-row fold (rows of both halves are contiguous in sq) ----
+            const int32_t foldSegs = H >> 6;
+            const int32_t foldTail = H & 63;
             if (foldSegs > 1) {
                 for (int32_t row = 0; row < n; ++row) {
                     AscendC::LocalTensor<float> sqRow =
@@ -263,47 +282,122 @@ private:
                                         AscendC::BinaryRepeatParams(1, 1, 1, 0, 8, 0));
                 }
             }
-            // Batched WRS: each repeat consumes one row (srcRepStride =
-            // alignH/8 blocks); dstRepStride = 1 element -> packed sums at
-            // sumSqArr[row]. mask = min(H, 64): the folded head holds the row
-            // total in 64 lanes (H < 64 rows are summed directly).
             AscendC::WholeReduceSum<float>(sumSqArr, sq, foldSegs > 0 ? 64 : H, n, 1, 1,
                                            alignH / 8);
-
-            // Weight cast (once, above): only needs the weight copy (its own
-            // event), never the chunk data.
 
             // ---- rstd = 1 / sqrt(mean + eps) per row (scalar unit) ----
             AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
             AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID1);
 
-            // ---- Phase B: y = R * rstd (per-row scalar), then per-row
-            // Mul(weight) (weight is a single row; reading it chunk-wide would
-            // go out of bounds) and a chunk-wide Cast to FP16. ----
+            // ---- Phase B, CANN DuplicateMulImpl style ----
+            AscendC::SetMaskCount();
+            AscendC::SetVectorMask<uint8_t, AscendC::MaskMode::COUNTER>(0, static_cast<uint32_t>(alignH));
+            const AscendC::UnaryRepeatParams unaryParams;
             for (int32_t row = 0; row < n; ++row) {
                 float meanPlusEps = sumSqArr.GetValue(static_cast<uint32_t>(row)) * invH + this->eps;
                 float rstd = 1.0f / sqrt(meanPlusEps);
                 AscendC::LocalTensor<float> rRow = rFp32[static_cast<uint32_t>(row) * static_cast<uint32_t>(alignH)];
-                AscendC::Muls(rRow, rRow, rstd, alignH);
-                AscendC::Mul(rRow, rRow, weightFp32, alignH);
+                AscendC::Muls<float, false>(rRow, rRow, rstd, AscendC::MASK_PLACEHOLDER, 1, unaryParams);
             }
+            AscendC::PipeBarrier<PIPE_V>();
+            const AscendC::BinaryRepeatParams binaryParams;
+            for (int32_t row = 0; row < n; ++row) {
+                AscendC::LocalTensor<float> rRow = rFp32[static_cast<uint32_t>(row) * static_cast<uint32_t>(alignH)];
+                AscendC::Mul<float, false>(rRow, rRow, weightFp32, AscendC::MASK_PLACEHOLDER, 1, binaryParams);
+            }
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::SetMaskNorm();
             AscendC::Cast(yT, rFp32, AscendC::RoundMode::CAST_NONE, chunkElems);
 
-            // ---- CopyOut: residual_out then y (one DataCopy each) ----
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
-            AscendC::DataCopy(residualOutGm[gmBase], resOutT, copyParams);
+            // ---- CopyOut: residual_out (half1 only when split) then y ----
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID3);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID3);
+            if (split) {
+                AscendC::DataCopyParams outH1 = copyParams;
+                outH1.blockCount = static_cast<uint16_t>(blocksPerRow <= 255 ? n1 : 2 * n1);
+                AscendC::DataCopy(residualOutGm[gmBase + static_cast<uint64_t>(n0) * static_cast<uint64_t>(H)],
+                                  resOutT[e0], outH1);
+            } else {
+                AscendC::DataCopy(residualOutGm[gmBase], resOutT, copyParams);
+            }
             AscendC::DataCopy(yGm[gmBase], yT, copyParams);
 
-            // ---- Single-buffer hazards for the NEXT chunk (multi-chunk
-            // shapes only; case 2 runs exactly one chunk and skips these) ----
+            // ---- Single-buffer hazards for the NEXT chunk ----
             if (rowBase + n < myRows) {
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID4);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID4);
             }
             rowBase += n;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Whole-row path (misaligned H fits in one UB tile)
+    // ------------------------------------------------------------------
+    __aicore__ inline void ProcessWholeRows() {
+        AscendC::LocalTensor<float> weightFp32 = weightFp32Buf.Get<float>();
+        AscendC::LocalTensor<float> resoFp32 = resoFp32Buf.Get<float>();
+        AscendC::LocalTensor<float> sq = sqBuf.Get<float>();
+        AscendC::LocalTensor<float> scalar = scalarBuf.Get<float>();
+
+        // Weight loaded once (full row, zero-padded to alignH), reused per row.
+        LoadWeightRow(weightFp32, 0, this->hiddenSize, this->alignedHidden);
+
+        const int32_t H = this->hiddenSize;
+        const int32_t alignH = this->alignedHidden;
+        const float invH = 1.0f / static_cast<float>(H);
+
+        for (int64_t row = this->startRow; row < this->endRow; ++row) {
+            uint64_t base = static_cast<uint64_t>(row) * static_cast<uint64_t>(H);
+
+            // --- Load x, residual (FP16 GM -> UB) ---
+            AscendC::LocalTensor<half> xLocal = inQueX.AllocTensor<half>();
+            AscendC::LocalTensor<half> resLocal = inQueRes.AllocTensor<half>();
+            CopyInRow(xLocal, xGm, base);
+            CopyInRow(resLocal, residualGm, base);
+            inQueX.EnQue(xLocal);
+            inQueRes.EnQue(resLocal);
+            xLocal = inQueX.DeQue<half>();
+            resLocal = inQueRes.DeQue<half>();
+
+            // residual_out (FP32) = Cast(x) + Cast(residual)
+            AscendC::Cast(resoFp32, xLocal, AscendC::RoundMode::CAST_NONE, alignH);
+            AscendC::Cast(sq, resLocal, AscendC::RoundMode::CAST_NONE, alignH);
+            AscendC::Add(resoFp32, resoFp32, sq, alignH);
+            inQueX.FreeTensor(xLocal);
+            inQueRes.FreeTensor(resLocal);
+
+            // --- Write residual_out (FP32 -> FP16 GM) ---
+            AscendC::LocalTensor<half> resOutLocal = outQueResOut.AllocTensor<half>();
+            AscendC::Cast(resOutLocal, resoFp32, AscendC::RoundMode::CAST_NONE, alignH);
+            outQueResOut.EnQue(resOutLocal);
+            resOutLocal = outQueResOut.DeQue<half>();
+            CopyOutRow(resOutLocal, residualOutGm, base);
+            outQueResOut.FreeTensor(resOutLocal);
+
+            // --- Reduce sum(residual_out^2) over the row (FP32) ---
+            AscendC::Mul(sq, resoFp32, resoFp32, alignH);
+            ReduceNormal(scalar, sq, H);
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            float sumSq = scalar.GetValue(0);
+
+            // rstd via vector Sqrt on a broadcast tile + scalar reciprocal.
+            float meanPlusEps = sumSq * invH + this->eps;
+            AscendC::Duplicate<float>(sq, meanPlusEps, alignH);
+            AscendC::Sqrt<float>(sq, sq, alignH);              // sq = rms
+            AscendC::Div(resoFp32, resoFp32, sq, alignH);      // /= rms
+            AscendC::Mul(resoFp32, resoFp32, weightFp32, alignH);  // *= weight
+
+            // --- Write y (FP32 -> FP16 GM) ---
+            AscendC::LocalTensor<half> yLocal = outQueY.AllocTensor<half>();
+            AscendC::Cast(yLocal, resoFp32, AscendC::RoundMode::CAST_NONE, alignH);
+            outQueY.EnQue(yLocal);
+            yLocal = outQueY.DeQue<half>();
+            CopyOutRow(yLocal, yGm, base);
+            outQueY.FreeTensor(yLocal);
         }
     }
 
@@ -453,6 +547,45 @@ private:
     // NOTE: no explicit PipeBarrier here: the TQue EnQue/DeQue pair on the
     // VECIN queue inserts the MTE2->V sync at DeQue, and with BUFFER_NUM=2 the
     // next iteration's MTE2 can overlap this row's vector work (double buffer).
+    __aicore__ inline void CopyInRow(AscendC::LocalTensor<half>& dst,
+                                     AscendC::GlobalTensor<half>& src, uint64_t off) {
+        if (this->aligned) {
+            AscendC::DataCopy(dst, src[off], static_cast<uint32_t>(this->hiddenSize));
+        } else {
+            AscendC::DataCopyExtParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = static_cast<uint32_t>(this->hiddenSize * sizeof(half));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+            AscendC::DataCopyPadExtParams<half> padParams;
+            padParams.isPad = (this->hiddenSize < this->alignedHidden);
+            padParams.leftPadding = 0;
+            padParams.rightPadding = static_cast<uint16_t>(this->alignedHidden - this->hiddenSize);
+            padParams.paddingValue = 0;
+            AscendC::DataCopyPad(dst, src[off], copyParams, padParams);
+        }
+    }
+
+    // Copy a full row (hiddenSize elems) from UB half -> GM half. Only the first
+    // hiddenSize elements are written. Aligned rows use fast DataCopy, misaligned
+    // use DataCopyPad (byte-granular).
+    // NOTE: no explicit V_MTE3 flag or PipeBarrier: the TQue EnQue/DeQue pair on
+    // the VECOUT queue inserts the V->MTE3 sync at DeQue, and double buffering
+    // lets the previous row's MTE3 overlap this row's vector work.
+    __aicore__ inline void CopyOutRow(AscendC::LocalTensor<half>& src,
+                                      AscendC::GlobalTensor<half>& dst, uint64_t off) {
+        if (this->aligned) {
+            AscendC::DataCopy(dst[off], src, static_cast<uint32_t>(this->hiddenSize));
+        } else {
+            AscendC::DataCopyExtParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = static_cast<uint32_t>(this->hiddenSize * sizeof(half));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+            AscendC::DataCopyPad(dst[off], src, copyParams);
+        }
+    }
+
     // Copy `n` elems (padded to nAlign) from GM half -> UB half.
     __aicore__ inline void CopyInChunk(AscendC::LocalTensor<half>& dst,
                                        AscendC::GlobalTensor<half>& src,
@@ -554,18 +687,17 @@ private:
 extern "C" __global__ __aicore__ void fused_add_rms_norm(GM_ADDR x, GM_ADDR residual, GM_ADDR weight,
                                                           GM_ADDR y, GM_ADDR residual_out,
                                                           GM_ADDR workspace, GM_ADDR tiling) {
-    // Read the tiling struct with direct scalar GM loads instead of the
+    // V21: read the tiling struct with direct scalar GM loads instead of the
     // framework GET_TILING_DATA macro. The macro routes the 24 B struct
     // through MTE2 -> UB -> two cross-pipe event syncs -> stack copy and
     // costs ~1.1 us more than five scalar loads (calibration 2026-08-27).
-    const __gm__ int32_t* tg = reinterpret_cast<const __gm__ int32_t*>(tiling);
     FusedAddRmsNormTilingData tilingData;
     tilingData.batchSize = tg[0];
     tilingData.hiddenSize = tg[1];
     tilingData.alignedHidden = tg[2];
     tilingData.alignNum = tg[3];
     tilingData.eps = *reinterpret_cast<const __gm__ float*>(&tg[4]);
-    tilingData.rowsPerChunk = tg[5];
+    tilingData.rowsPerChunk = code;
 
     AscendC::TPipe pipe;
     KernelFusedAddRmsNorm op;

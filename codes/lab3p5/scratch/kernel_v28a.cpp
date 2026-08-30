@@ -145,13 +145,10 @@ public:
         if (this->startRow >= this->endRow) return;
         if (this->hiddenSize <= 0) return;
 
-        // V28b: the whole-row path is removed for code size (binary size
-        // measurably inflates the launch floor; see experiment log §10).
-        // Misaligned H that fits one tile now streams through the chunked
-        // path (one chunk per row, two passes). Those shapes only affect
-        // correctness, not the scored case 2.
         if (this->useBatch) {
             ProcessAlignedBatch();
+        } else if (this->alignedHidden <= this->tileElems) {
+            ProcessWholeRows();
         } else {
             ProcessChunkedRows();
         }
@@ -308,6 +305,74 @@ private:
     }
 
     // ------------------------------------------------------------------
+    //  Whole-row path (misaligned H fits in one UB tile)
+    // ------------------------------------------------------------------
+    __aicore__ inline void ProcessWholeRows() {
+        AscendC::LocalTensor<float> weightFp32 = weightFp32Buf.Get<float>();
+        AscendC::LocalTensor<float> resoFp32 = resoFp32Buf.Get<float>();
+        AscendC::LocalTensor<float> sq = sqBuf.Get<float>();
+        AscendC::LocalTensor<float> scalar = scalarBuf.Get<float>();
+
+        // Weight loaded once (full row, zero-padded to alignH), reused per row.
+        LoadWeightRow(weightFp32, 0, this->hiddenSize, this->alignedHidden);
+
+        const int32_t H = this->hiddenSize;
+        const int32_t alignH = this->alignedHidden;
+        const float invH = 1.0f / static_cast<float>(H);
+
+        for (int64_t row = this->startRow; row < this->endRow; ++row) {
+            uint64_t base = static_cast<uint64_t>(row) * static_cast<uint64_t>(H);
+
+            // --- Load x, residual (FP16 GM -> UB) ---
+            AscendC::LocalTensor<half> xLocal = inQueX.AllocTensor<half>();
+            AscendC::LocalTensor<half> resLocal = inQueRes.AllocTensor<half>();
+            CopyInRow(xLocal, xGm, base);
+            CopyInRow(resLocal, residualGm, base);
+            inQueX.EnQue(xLocal);
+            inQueRes.EnQue(resLocal);
+            xLocal = inQueX.DeQue<half>();
+            resLocal = inQueRes.DeQue<half>();
+
+            // residual_out (FP32) = Cast(x) + Cast(residual)
+            AscendC::Cast(resoFp32, xLocal, AscendC::RoundMode::CAST_NONE, alignH);
+            AscendC::Cast(sq, resLocal, AscendC::RoundMode::CAST_NONE, alignH);
+            AscendC::Add(resoFp32, resoFp32, sq, alignH);
+            inQueX.FreeTensor(xLocal);
+            inQueRes.FreeTensor(resLocal);
+
+            // --- Write residual_out (FP32 -> FP16 GM) ---
+            AscendC::LocalTensor<half> resOutLocal = outQueResOut.AllocTensor<half>();
+            AscendC::Cast(resOutLocal, resoFp32, AscendC::RoundMode::CAST_NONE, alignH);
+            outQueResOut.EnQue(resOutLocal);
+            resOutLocal = outQueResOut.DeQue<half>();
+            CopyOutRow(resOutLocal, residualOutGm, base);
+            outQueResOut.FreeTensor(resOutLocal);
+
+            // --- Reduce sum(residual_out^2) over the row (FP32) ---
+            AscendC::Mul(sq, resoFp32, resoFp32, alignH);
+            ReduceNormal(scalar, sq, H);
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            float sumSq = scalar.GetValue(0);
+
+            // rstd via vector Sqrt on a broadcast tile + scalar reciprocal.
+            float meanPlusEps = sumSq * invH + this->eps;
+            AscendC::Duplicate<float>(sq, meanPlusEps, alignH);
+            AscendC::Sqrt<float>(sq, sq, alignH);              // sq = rms
+            AscendC::Div(resoFp32, resoFp32, sq, alignH);      // /= rms
+            AscendC::Mul(resoFp32, resoFp32, weightFp32, alignH);  // *= weight
+
+            // --- Write y (FP32 -> FP16 GM) ---
+            AscendC::LocalTensor<half> yLocal = outQueY.AllocTensor<half>();
+            AscendC::Cast(yLocal, resoFp32, AscendC::RoundMode::CAST_NONE, alignH);
+            outQueY.EnQue(yLocal);
+            yLocal = outQueY.DeQue<half>();
+            CopyOutRow(yLocal, yGm, base);
+            outQueY.FreeTensor(yLocal);
+        }
+    }
+
+    // ------------------------------------------------------------------
     //  Chunked-row path (H > UB tile): two streaming passes per row.
     //  Pass 1: stream chunks, accumulate sum(residual_out^2) -> rstd.
     //  Pass 2: stream chunks, apply rstd*weight, write y + residual_out.
@@ -453,6 +518,45 @@ private:
     // NOTE: no explicit PipeBarrier here: the TQue EnQue/DeQue pair on the
     // VECIN queue inserts the MTE2->V sync at DeQue, and with BUFFER_NUM=2 the
     // next iteration's MTE2 can overlap this row's vector work (double buffer).
+    __aicore__ inline void CopyInRow(AscendC::LocalTensor<half>& dst,
+                                     AscendC::GlobalTensor<half>& src, uint64_t off) {
+        if (this->aligned) {
+            AscendC::DataCopy(dst, src[off], static_cast<uint32_t>(this->hiddenSize));
+        } else {
+            AscendC::DataCopyExtParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = static_cast<uint32_t>(this->hiddenSize * sizeof(half));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+            AscendC::DataCopyPadExtParams<half> padParams;
+            padParams.isPad = (this->hiddenSize < this->alignedHidden);
+            padParams.leftPadding = 0;
+            padParams.rightPadding = static_cast<uint16_t>(this->alignedHidden - this->hiddenSize);
+            padParams.paddingValue = 0;
+            AscendC::DataCopyPad(dst, src[off], copyParams, padParams);
+        }
+    }
+
+    // Copy a full row (hiddenSize elems) from UB half -> GM half. Only the first
+    // hiddenSize elements are written. Aligned rows use fast DataCopy, misaligned
+    // use DataCopyPad (byte-granular).
+    // NOTE: no explicit V_MTE3 flag or PipeBarrier: the TQue EnQue/DeQue pair on
+    // the VECOUT queue inserts the V->MTE3 sync at DeQue, and double buffering
+    // lets the previous row's MTE3 overlap this row's vector work.
+    __aicore__ inline void CopyOutRow(AscendC::LocalTensor<half>& src,
+                                      AscendC::GlobalTensor<half>& dst, uint64_t off) {
+        if (this->aligned) {
+            AscendC::DataCopy(dst[off], src, static_cast<uint32_t>(this->hiddenSize));
+        } else {
+            AscendC::DataCopyExtParams copyParams;
+            copyParams.blockCount = 1;
+            copyParams.blockLen = static_cast<uint32_t>(this->hiddenSize * sizeof(half));
+            copyParams.srcStride = 0;
+            copyParams.dstStride = 0;
+            AscendC::DataCopyPad(dst[off], src, copyParams);
+        }
+    }
+
     // Copy `n` elems (padded to nAlign) from GM half -> UB half.
     __aicore__ inline void CopyInChunk(AscendC::LocalTensor<half>& dst,
                                        AscendC::GlobalTensor<half>& src,
@@ -554,18 +658,37 @@ private:
 extern "C" __global__ __aicore__ void fused_add_rms_norm(GM_ADDR x, GM_ADDR residual, GM_ADDR weight,
                                                           GM_ADDR y, GM_ADDR residual_out,
                                                           GM_ADDR workspace, GM_ADDR tiling) {
-    // Read the tiling struct with direct scalar GM loads instead of the
+    // V21: read the tiling struct with direct scalar GM loads instead of the
     // framework GET_TILING_DATA macro. The macro routes the 24 B struct
     // through MTE2 -> UB -> two cross-pipe event syncs -> stack copy and
     // costs ~1.1 us more than five scalar loads (calibration 2026-08-27).
+    // Probe codes (rowsPerChunk; real values are always in [1,8]): 98 pure
+    // return, 99 one scalar read, 105 direct reads, 106 GET_TILING_DATA.
     const __gm__ int32_t* tg = reinterpret_cast<const __gm__ int32_t*>(tiling);
+    int32_t code = tg[5];
+    if (code == 98) return;
+    if (code == 99) { volatile int32_t v = tg[0]; (void)v; return; }
+    if (code == 105) {
+        volatile int32_t b = tg[0];
+        volatile int32_t h = tg[1];
+        volatile float eps = *reinterpret_cast<const __gm__ float*>(&tg[4]);
+        (void)b; (void)h; (void)eps;
+        return;
+    }
+    if (code == 106) {
+        GET_TILING_DATA(tilingDataP, tiling);
+        volatile int32_t b = tilingDataP.batchSize;
+        (void)b;
+        return;
+    }
+
     FusedAddRmsNormTilingData tilingData;
     tilingData.batchSize = tg[0];
     tilingData.hiddenSize = tg[1];
     tilingData.alignedHidden = tg[2];
     tilingData.alignNum = tg[3];
     tilingData.eps = *reinterpret_cast<const __gm__ float*>(&tg[4]);
-    tilingData.rowsPerChunk = tg[5];
+    tilingData.rowsPerChunk = code;
 
     AscendC::TPipe pipe;
     KernelFusedAddRmsNorm op;

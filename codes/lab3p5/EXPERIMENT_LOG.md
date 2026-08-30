@@ -328,3 +328,153 @@ case2 每核 8 行单 chunk：MTE2(1.51us)→V(1.52us)→S→V(B)→MTE3 全串�
 aiv med 5.00 / max 5.89，Task 6.28。要 <5.08 必须把 MTE2 藏到 V 下面（管线），
 但所有多 tile 管线实现在此工具链下死锁（见上）。固定成本（空核探测 ~4us
 Task @40 核；entry ~1.8us）也吃掉大半余量。
+
+---
+
+## 10. 第三轮优化（2026-08-27 晚，V20→V27）
+
+### 动机与评分曲线复核
+对课程 score.png 重新做像素级拟合（本次全曲线最小二乘）：
+score(T) = 80.98·ln(15.2/T)，RMSE 0.91 分。
+验证点：6.02us → 75 分（与官方 76 吻合），100 分 ⟺ 4.42us，
+110 ⟺ 3.91，**120 ⟺ 3.454us**。目标 T≤3.45。
+
+### 环境地板标定（关键发现，scratch/calib.sh + kernel 探针）
+同一 job 内交替测量（消除设备漂移）：
+- 纯 return kernel（code 97）：**Task = 3.36-3.52us（晚间状态）**；早间曾测得 2.42-2.50。
+  → **地板随时间在 2.4~3.5us 之间漂移（共租/温度），跨 job 绝对值不可比**。
+- 仅加载探针（code 96：tiling 直读 + weight/x/res MTE2 + E0 wait，无计算）：
+  3.40-3.92 vs 地板 3.38-3.66 → **输入加载几乎免费（藏在 dispatch ramp 下，仅 +0.1~0.3）**。
+- GET_TILING_DATA（code 106）vs 直接标量读 tiling（code 105）：4.36-5.02 vs 3.26-3.50，
+  **框架宏贵 ~1.0-1.4us**（内部 MTE2→UB→两道跨流水事件→栈拷贝）。V21 起改为直读。
+- 满核 32 块地板平坦（1~32 块均 ~2.4-3.4，无逐块斜率）。
+- **满 kernel body（Task − 地板，同 job）≈ 2.5-2.7us**；simulator 显示 30 条向量 API
+  调用各需 ~5-8 条 STI 标量发射指令 + 31 个 BAR，**指令发射开销主导 body**。
+
+### 迭代表（case 2，checker/profile.sh 顺序 3-5 次）
+| 版本 | 主要修改 | 5 case | case2 us | 结论 |
+|---|---|---|---|---|
+| V20 | CANN-LayerNorm 式 fold（每行 1 条跨步 Add 折到 64 lane）+ 批量 WRS（repeatTime=行数，dst 打包） | 5/5 | 6.00-6.52 | 无显著变化（reduces API 调用本已不是瓶颈） |
+| V21 | tiling 直读替代 GET_TILING_DATA | 5/5 | 6.02-6.40 | 标定下省 ~1us 但实际 kernel 中该读可与启动重叠，未见收益 |
+| V22 | 纯 fp16 y 路径（fp16 Add + fp16 Muls/Mul） | **y=FAIL×4** | — | **精度拒绝**：3 个 fp16 舍入 + rstd fp16 化，误差可达 ~2.4e-3 > 1e-3 |
+| V22b | 混合：residual_out 用 fp16 Add（与 golden 位级相等：两 fp16 之和在 fp32 精确、再舍入 = fp16 加法语义），y 路径回 fp32（Cast up 一次） | 5/5 | 5.54-6.62 | 接受（vec 1.40→1.19） |
+| V23 | phase B 改 CANN DuplicateMulImpl 惯用式（isSetMask=false + 预置 COUNTER mask + 每 loop 一个 barrier） | 5/5 | 5.96-6.26 | 无变化（barrier 非实际瓶颈） |
+| V24 | 两半软件流水（先发 h0/h1 两个加载，算 h0 时 MTE2 流 h1）+ resOut-h0 提前 MTE3 | 5/5+隐藏全过 | 5.72-6.44 | 无变化（两段太粗，fill/drain 吃掉收益；事件时序未破坏正确性） |
+| V25 | weight 加载并入 E0 事件（省一对 Set/Wait） | **5/5+隐藏全过** | 5.52-6.40 | **当前正式版** |
+| V26 | BlockReduceSum 树（BS1+BS2+WRS 3 条指令替代 8 fold+WRS） | **y=FAIL** | — | **硬件拒绝**：多 repeat WRS 在 srcRepStride<8 block 时读错（B=64 奇数行 sum 多 ~1/17 partial）；单行(n=1)树正确。多行必须 fold 到 64 lane |
+| V27 | wTile 广播（UB→UB DataCopy srcStride=0 + 整块 Mul） | 5/5 公开，**H=512 隐藏 FAIL** | 5.86-6.32 | **机制不可靠拒绝**：srcStride=0 是"块间无 gap"=连续读，不是重读；weightFp32 越界读，H=1024 碰巧通过、H=512 读到垃圾（行 1-7 错、行 0 对） |
+
+### 本轮关键结论
+1. **Task = 地板(2.4~3.5, 时变) + body(~2.5)**。地板漂移 ±1us，主导绝对分数的方差；
+   body 才是可控部分。本轮 body 从早间 ~3.9 降到 ~2.5（fp16 Add、fold+WRS、直读 tiling、
+   事件精简），但晚间地板同步升高，绝对 Task 未跌破 ~5.9 中位。
+2. **body 的构成**（simulator + pipe profile）：指令发射 ~1.0-1.3（30 条向量 API）+
+   vec 有效计算 ~0.5 + 同步/等待 ~0.5 + MTE3 0.39 + 标量 rstd ~0.2。
+   每条向量 API 的标量发射开销（5-8 条 STI）使"少指令"成为唯一深层杠杆；
+   但逐行 Muls（rstd 逐行标量）与逐行 fold 是算法必需（广播无合法单指令表达：
+   DataCopy srcStride 无法负/重读，Select-broadcast 语义不符）。
+3. **多 repeat WholeReduceSum 约束**：srcRepStride 必须 ≥ 8 block（一行满 repeat）；
+   折到 16 lane 后用 repeat=n 打包读取会读错（经验证）。V20 的 fold 到 64 lane + WRS
+   (mask=64, repeat=n, srcRep=alignH/8) 是合法边界。
+4. **fp16 快速路径不可行**（V22）：checker 双判据 1e-3 下 y 精度不足；
+   但 fp16 加法产出 residual_out 与 golden 位级相等，可安全使用。
+5. 40 块 vs 32 块：中位 6.40 vs 5.98（V27 下复测，32 更优，负载不均 + 地板）。
+6. **当前极限评估**：完美流水 body ≈ max(mte2, vec) ≈ 1.2-1.5；Task 理想 ≈ 3.6-5.0
+   （取决于地板状态）。120 分（3.45us）在当前地板状态（3.2-3.4）下不可达；
+   若 OJ 时段地板回到 ~2.4（早间状态），当前 V25 理论可达 ~4.9-5.3（~90 分）。
+
+### V25 最终状态（本轮交付）
+- 正确性：5/5 公开 + 22/22 隐藏 shape（含 L 范围、边界 H、多 chunk）全过。
+- case2：5.52-6.62（10 样本中位 ~6.0）；profile：vec 1.19, mte2 0.53, mte3 0.39,
+  scalar 2.5（含等待）。
+- 结构：V13 三路径骨架 + 直读 tiling + fp16 Add 产出 residual_out + fold/批量 WRS
+  reduce + DuplicateMulImpl 式 phase B + 两半流水加载 + 事件精简（E0 含 weight）。
+- 远端正式目录 ~/lab3p5/src/ascendc/（op_host 为干净版，无探针代码）；
+  探针/标定脚本在 ~/lab3p5/scratch/（本地 codes/lab3p5/scratch/ 同步）。
+
+### 附：正式提交版本
+正式 kernel = V25-clean（探针分发代码已剥离）：本地 codes/lab3p5/fused_add_rms_norm_v25_final.cpp
+（= src/ascendc/op_kernel/fused_add_rms_norm.cpp，与远端 md5 一致）。
+终验（剥离后）：5/5 公开 + 隐藏全过，case2 = 5.88/5.92/6.12us。
+
+---
+
+## 11. 第四轮：地板分解与投机预取（2026-08-27 深夜，V28→V30）
+
+### 地板机制的最终澄清（三种假设逐一检验）
+1. **二进制大小假设**：最小 kernel（.o 5984B）地板 2.40-2.62；V28b（10240B）pre-init
+   地板 3.30-3.38；V25（18480B）3.36-3.52；batch-only 诊断版（6096B）**也是 3.00-3.80**。
+   → 6-18.5KB 之间大小无关，**假设否定**（18.5→10.2→6.1KB 地板不变）。
+2. **时间漂移假设**：最小 kernel 在 15:15 与 20:00 两个时点均测 2.4-2.6 → **假设否定**
+   （地板稳定，无时变）。
+3. **tiling 读延迟假设（成立）**：最小 kernel（不读任何 GM）2.48 vs 读一次 tg[5] 后
+   return（任意大小二进制）3.30-3.52。**差值 ≈0.9us = 首次 GM 标量读的 HBM 延迟**，
+   完全暴露在关键路径上（每次 launch 都 miss：runtime 在 launch 前 invalidate L2
+   或 tiling 写不驻留 L2）。后续 tiling 字段读为 L2 命中（~免费）。
+
+**最终地板模型：Task = launch(2.48) + tiling 首读(0.9) + body(2.5) ≈ 5.9（与实测吻合）**
+（staff 图表 launch@32核 ≈ 1.9，即 staff 3.5us 参考值 ≈ 1.9+0.9+0.7）
+
+### V28：结构精简（去 whole-row 路径）
+- V28a = V22b + weight 并入 E0 事件：.o 18480→14360B，5/5，5.74-6.20。
+- V28b = V28a + 删除 ProcessWholeRows/CopyInRow/CopyOutRow（错位 H≤4096 走 chunked
+  两遍路径，只影响非计分 shape 的性能）：.o → **10240B**，5/5+隐藏全过，5.70-6.08。
+- V28c = V28b + 剥离惰性探针分发代码：.o 10240B，5/5+隐藏全过，5.98-6.32。
+  （二进制缩减后地板不变，证实大小假设否定。）
+
+### V30：投机预取流水（设计、修复、最终否决）
+**设计**：InitBuffers（固定最大尺寸，不依赖 tiling）在 extern C 里先发
+block-k-猜-布局（256×1024：block k 拥有行 [8k,8k+8)）的 x/res/weight 投机
+DataCopy 到真实 UB 缓冲（E0 事件），再读 tiling（0.9us 延迟与 MTE2 流水重叠）；
+tiling 到达后若猜测命中（H==1024 && n==8 && startRow==8k && blockDim==32）跳过拷贝。
+**修复过程**：私有成员访问、UB 232KB 超限（两套缓冲并存→改为仅预分配 inBuf/wHalf，
+其余 InitLate 条件分配）、多 chunk 无 Set 的 Wait 挂死（rowBase==0 才 Wait）。
+**结果**：case_1 计分 case 通过且命中快路径，但其余 shape 出现**与内存布局相关的
+随机损坏/崩溃**（同 shape 单独跑过、顺序跑挂；首例 32×4096 y_bad=28269）。
+**根因**：投机读的越界（OOB）依赖相邻 VA 恰好映射——对 256KB 张量读 [496KB,512KB)
+越界 256KB，MTE2 有时静默出错/挂起（读侧无 MMU 边界检查≠安全）。
+**结论：OOB 投机预取对通用 shape 不安全，V30 否决**（保留于 scratch 作记录）。
+（附带发现：编译器错误日志含 % 时 Python 日志格式化崩溃吞掉真实错误——排障时
+先把源码中 % 换成等价算术才能看到报错。）
+
+### 最终评分预测与可达性结论
+- V28c（正式版）：中位 ~6.0us → **约 76-78 分**；最好样本 5.7 → ~80 分。
+- 理论极限：launch 2.48 + tiling 0.9 = **3.38us 硬地板**（零计算 body 也 3.38），
+  120 分阈值 3.454us → 允许的计算预算仅 ~0.07us，**任何实现都不可能**。
+  100 分（4.42us）需 body ≤1.04us：phase B 逐行 Muls（16 条向量 API）+
+  规约→标量→回写的串行链 ~1.2-1.5us 为算法必需，**同样不可达**。
+- 环境内现实上限 ≈ **85-92 分**（body 压至 1.5 时 ≈4.9us）。
+- 判定：本环境（launch 地板 2.48 + tiling 读 0.9）下 120 分被外部结构性封顶；
+  OJ 时段若地板与 staff 图表一致（1.9），同代码约 4.9-5.2us ≈ 88-90 分。
+
+### 本轮正式交付
+- 正式 kernel = **V28c**：codes/lab3p5/fused_add_rms_norm_v28c_final.cpp
+  （= src/ascendc/op_kernel/fused_add_rms_norm.cpp = 远端 md5 adaec088…）。
+- 终验：5/5 公开 + 22/22 隐藏 shape 全过；case2 五样本 5.96/6.00/6.00/6.18/6.24。
+- 结构：V13 三路径 → 两路径（batch + chunked，whole-row 删除）；
+  直读 tiling；fp16 Add 产出 residual_out（位级等于 golden）；fold+批量 WRS；
+  weight 并入 E0；blockDim=min(AIV,B,32)。
+
+### 附 2：正式交付终验（clean host，2026-08-27 22:09-22:20）
+- 修复：远端 op_host 此前残留 LAB35_PROBE 探针代码（惰性但不该随包分发），
+  已恢复干净版（md5 046471a6…，与本地 src/ascendc/op_host 一致）并重建。
+- 终验（clean host + V28c kernel，md5 adaec088…）：
+  - 正确性：5/5 公开 case + 22/22 隐藏 shape 全过；
+  - case2 五样本：5.84 / 6.32 / 6.06 / 6.08 / 6.04（中位 6.06），
+    checker/profile.sh 单次 5.96 us。
+- 报告已更新：labs/lab3.5.typ 增补第二轮冲刺章节（评分曲线重拟合、地板
+  分解、V20-V28 保留项、V22/V26/V27/V30 拒绝项）与 V28c 终态结果表，
+  重新编译 labs/lab3.5.pdf 通过（无 em dash、无未解析资产）。
+- 提交状态：正式代码在远端 ~/lab3p5/src/ascendc/（op_host 干净版 + V28c
+  kernel），本地 codes/lab3p5/{fused_add_rms_norm_v28c_final.cpp, src/} 同步。
+  未提交 OJ（按规则需用户明确要求）；按评分曲线 V28c 预计 78-80 分。
+
+### 附 3：地板日/夜稳定性验证（2026-08-28 06:40 BJT）
+为排除"地板随时段变化"的最后一个可能：
+- 纯 return kernel（无任何 GM 读）地板：2.40 / 2.54 / 2.70 us（北京清晨），
+  与夜间两个时点（23:15、04:00 BJT）测的 2.40-2.62 完全一致；
+- V28c 完整 kernel 同一时段：5.60 / 5.66 / 5.94 / 6.26 / 6.32（中位 5.94）。
+**结论：地板与时段无关（三个时点三次复测一致），结构封顶结论最终确认。**
+120 分（3.45 us）- 硬地板（2.45 + 0.9 = 3.35）= 0.10 us 计算预算，
+低于任何正确实现的最小 body（规约→标量 rstd→逐行缩放的串行链 ≥1.0 us）。
+本环境现实上限约 100 分（理论）/ 85-90 分（工程可达）。

@@ -1,7 +1,0 @@
-# Normalized Stage-B evidence. NA means the legacy V9 profile did not measure
-# that component separately; raw legacy rows are in checkpoints/GateC-20260825-2320/profile_case3.csv.
-case,version,level_or_step,m,n,k,nb,kernel,instruction_path,active_threads,pack_a_ms,pack_b_ms,kernel_ms,gemm_ms,solve_ms,barrier_ms,fork_ms,join_ms,min_thread_ms,max_thread_ms,bytes_packed,flops,gflops
-3,V9,S0,16800,512,224,224,KBLAS_update,SME_FMOPA,38,NA,NA,17.819383,17.819383,0,16.594755,0.009450,0.072621,1.143467,17.735692,NA,3853516800,216.245
-3,SME16x32,SINGLE_TILE,16800,512,224,16x32,custom_gemm,SME_FMOPA,38,NA,NA,2.218754,2.218754,0,NA,NA,NA,NA,NA,31023104,3853516800,1736.793
-3,SME16x32,SHARED_PACK,16800,512,224,16x32,custom_gemm_shared_pack,SME_FMOPA,38,NA,NA,2.527006,2.527006,0,NA,NA,NA,NA,NA,31023104,3853516800,1524.934
-3,KBLAS_PACKED,UPDATE,16800,512,224,224,KBLAS_packed_compute,SME_FMOPA,38,NA,NA,7.847481,7.847481,0,NA,NA,NA,NA,NA,31023104,3853516800,491.051

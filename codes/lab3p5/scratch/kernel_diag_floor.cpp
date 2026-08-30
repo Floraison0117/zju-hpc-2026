@@ -127,17 +127,6 @@ public:
             pipe->InitBuffer(weightHalfBuf, tileBytesFp16);
             pipe->InitBuffer(weightFp32Buf, tileBytesFp32);
             pipe->InitBuffer(scalarBuf, 32);                 // 1 FP32 scalar, 32B-aligned
-        } else {
-            pipe->InitBuffer(inQueX, BUFFER_NUM, tileBytesFp16);
-            pipe->InitBuffer(inQueRes, BUFFER_NUM, tileBytesFp16);
-            pipe->InitBuffer(outQueY, BUFFER_NUM, tileBytesFp16);
-            pipe->InitBuffer(outQueResOut, BUFFER_NUM, tileBytesFp16);
-            pipe->InitBuffer(weightHalfBuf, tileBytesFp16);
-            pipe->InitBuffer(weightFp32Buf, tileBytesFp32);
-            pipe->InitBuffer(resoFp32Buf, tileBytesFp32);
-            pipe->InitBuffer(sqBuf, tileBytesFp32);
-            pipe->InitBuffer(scalarBuf, 32);                 // 1 FP32 scalar, 32B-aligned
-            pipe->InitBuffer(reduceTmpBuf, 32);              // reduce scratch, 32B-aligned
         }
     }
 
@@ -145,16 +134,9 @@ public:
         if (this->startRow >= this->endRow) return;
         if (this->hiddenSize <= 0) return;
 
-        // V28b: the whole-row path is removed for code size (binary size
-        // measurably inflates the launch floor; see experiment log §10).
-        // Misaligned H that fits one tile now streams through the chunked
-        // path (one chunk per row, two passes). Those shapes only affect
-        // correctness, not the scored case 2.
-        if (this->useBatch) {
-            ProcessAlignedBatch();
-        } else {
-            ProcessChunkedRows();
-        }
+        // DIAGNOSTIC BUILD: batch path only (size->floor cliff test).
+        ProcessAlignedBatch();
+        (void)0;
     }
 
 private:
@@ -308,120 +290,14 @@ private:
     }
 
     // ------------------------------------------------------------------
-    //  Chunked-row path (H > UB tile): two streaming passes per row.
-    //  Pass 1: stream chunks, accumulate sum(residual_out^2) -> rstd.
-    //  Pass 2: stream chunks, apply rstd*weight, write y + residual_out.
-    //  (Weight is streamed per chunk in pass 2.)
-    // ------------------------------------------------------------------
-    __aicore__ inline void ProcessChunkedRows() {
-        AscendC::LocalTensor<float> weightFp32 = weightFp32Buf.Get<float>();
-        AscendC::LocalTensor<float> resoFp32 = resoFp32Buf.Get<float>();
-        AscendC::LocalTensor<float> sq = sqBuf.Get<float>();
-        AscendC::LocalTensor<float> scalar = scalarBuf.Get<float>();
-
-        const int32_t H = this->hiddenSize;
-        const int32_t chunkElems = this->tileElems;   // multiple of ALIGN_NUM
-        const float invH = 1.0f / static_cast<float>(H);
-
-        for (int64_t row = this->startRow; row < this->endRow; ++row) {
-            uint64_t base = static_cast<uint64_t>(row) * static_cast<uint64_t>(H);
-
-            // --- Pass 1: residual_out + accumulate sum-of-squares ---
-            float sumSq = 0.0f;
-            int32_t off = 0;
-            while (off < H) {
-                int32_t n = (H - off > chunkElems) ? chunkElems : (H - off);
-                int32_t nAlign = (n + this->alignNum - 1) / this->alignNum * this->alignNum;
-
-                AscendC::LocalTensor<half> xLocal = inQueX.AllocTensor<half>();
-                AscendC::LocalTensor<half> resLocal = inQueRes.AllocTensor<half>();
-                CopyInChunk(xLocal, xGm, base + off, n, nAlign);
-                CopyInChunk(resLocal, residualGm, base + off, n, nAlign);
-                inQueX.EnQue(xLocal);
-                inQueRes.EnQue(resLocal);
-                xLocal = inQueX.DeQue<half>();
-                resLocal = inQueRes.DeQue<half>();
-
-                AscendC::Cast(resoFp32, xLocal, AscendC::RoundMode::CAST_NONE, nAlign);
-                AscendC::Cast(sq, resLocal, AscendC::RoundMode::CAST_NONE, nAlign);
-                AscendC::Add(resoFp32, resoFp32, sq, nAlign);
-                AscendC::Mul(sq, resoFp32, resoFp32, nAlign);
-                ReduceNormal(scalar, sq, n);
-                AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-                sumSq += scalar.GetValue(0);
-
-                inQueX.FreeTensor(xLocal);
-                inQueRes.FreeTensor(resLocal);
-                off += n;
-            }
-
-            float meanPlusEps = sumSq * invH + this->eps;
-
-            // --- Pass 2: recompute residual_out, apply rstd*weight, write y + res_out ---
-            off = 0;
-            while (off < H) {
-                int32_t n = (H - off > chunkElems) ? chunkElems : (H - off);
-                int32_t nAlign = (n + this->alignNum - 1) / this->alignNum * this->alignNum;
-
-                AscendC::LocalTensor<half> xLocal = inQueX.AllocTensor<half>();
-                AscendC::LocalTensor<half> resLocal = inQueRes.AllocTensor<half>();
-                CopyInChunk(xLocal, xGm, base + off, n, nAlign);
-                CopyInChunk(resLocal, residualGm, base + off, n, nAlign);
-                inQueX.EnQue(xLocal);
-                inQueRes.EnQue(resLocal);
-                xLocal = inQueX.DeQue<half>();
-                resLocal = inQueRes.DeQue<half>();
-
-                AscendC::Cast(resoFp32, xLocal, AscendC::RoundMode::CAST_NONE, nAlign);
-                AscendC::Cast(sq, resLocal, AscendC::RoundMode::CAST_NONE, nAlign);
-                AscendC::Add(resoFp32, resoFp32, sq, nAlign);
-                inQueX.FreeTensor(xLocal);
-                inQueRes.FreeTensor(resLocal);
-
-                // residual_out -> GM (FP16)
-                AscendC::LocalTensor<half> resOutLocal = outQueResOut.AllocTensor<half>();
-                AscendC::Cast(resOutLocal, resoFp32, AscendC::RoundMode::CAST_NONE, nAlign);
-                outQueResOut.EnQue(resOutLocal);
-                resOutLocal = outQueResOut.DeQue<half>();
-                CopyOutChunk(resOutLocal, residualOutGm, base + off, n);
-                outQueResOut.FreeTensor(resOutLocal);
-
-                // y = (residual_out / rms) * weight  (Div+Sqrt path, see whole-row).
-                AscendC::Duplicate<float>(sq, meanPlusEps, nAlign);
-                AscendC::Sqrt<float>(sq, sq, nAlign);
-                AscendC::Div(resoFp32, resoFp32, sq, nAlign);
-                LoadWeightRow(weightFp32, off, n, nAlign);  // weight chunk for this offset
-                AscendC::Mul(resoFp32, resoFp32, weightFp32, nAlign);
-
-                AscendC::LocalTensor<half> yLocal = outQueY.AllocTensor<half>();
-                AscendC::Cast(yLocal, resoFp32, AscendC::RoundMode::CAST_NONE, nAlign);
-                outQueY.EnQue(yLocal);
-                yLocal = outQueY.DeQue<half>();
-                CopyOutChunk(yLocal, yGm, base + off, n);
-                outQueY.FreeTensor(yLocal);
-
-                off += n;
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
     //  Helpers
     // ------------------------------------------------------------------
-    // Number of FP32 lanes the per-row sumSq array occupies (multiple of 8).
     __aicore__ inline int32_t SumAligned() const {
         int32_t s = this->rowsPerChunk;
         if (s < 1) s = 1;
         return ((s + 7) / 8) * 8;
     }
 
-    // Load `realN` weight elements from GM offset `off`, zero-pad the tail up
-    // to `nAlign` (nAlign >= realN, both multiples of ALIGN_NUM), and Cast them
-    // into the FP32 weight tile `wFp32[0..nAlign)`. The padded tail is zero, so
-    // the later Mul(reso, reso, wFp32, nAlign) is correct for the real elements
-    // and harmless (×0) for the tail — which is never written back anyway
-    // (CopyOut uses blockLen = n bytes).
     __aicore__ inline void LoadWeightRow(AscendC::LocalTensor<float>& wFp32,
                                          int32_t off, int32_t realN, int32_t nAlign) {
         AscendC::LocalTensor<half> wHalf = weightHalfBuf.Get<half>();
@@ -453,7 +329,6 @@ private:
     // NOTE: no explicit PipeBarrier here: the TQue EnQue/DeQue pair on the
     // VECIN queue inserts the MTE2->V sync at DeQue, and with BUFFER_NUM=2 the
     // next iteration's MTE2 can overlap this row's vector work (double buffer).
-    // Copy `n` elems (padded to nAlign) from GM half -> UB half.
     __aicore__ inline void CopyInChunk(AscendC::LocalTensor<half>& dst,
                                        AscendC::GlobalTensor<half>& src,
                                        uint64_t off, int32_t n, int32_t nAlign) {
@@ -470,7 +345,6 @@ private:
         AscendC::DataCopyPad(dst, src[off], copyParams, padParams);
     }
 
-    // Copy `n` elems from UB half -> GM half (byte-granular blockLen).
     __aicore__ inline void CopyOutChunk(AscendC::LocalTensor<half>& src,
                                         AscendC::GlobalTensor<half>& dst,
                                         uint64_t off, int32_t n) {
@@ -482,12 +356,6 @@ private:
         AscendC::DataCopyPad(dst[off], src, copyParams);
     }
 
-    // High-performance FP32 reduce: BlockReduceSum loop + WholeReduceSum.
-    // Reduces the first `totalElements` of src into dst[0] (one FP32 scalar).
-    // Uses SetMaskCount + SetVectorMask<COUNTER>(totalElements) so only the
-    // first totalElements participate (the UB tail, if any, is ignored).
-    // NOTE: this clobbers `src` in place (BlockReduceSum writes partial sums
-    // back into it); callers must not rely on src afterwards.
     __aicore__ inline void ReduceNormal(const AscendC::LocalTensor<float>& dst,
                                         const AscendC::LocalTensor<float>& src,
                                         const int totalElements) {
@@ -538,16 +406,10 @@ private:
     AscendC::TBuf<AscendC::TPosition::VECCALC> sumSqBuf;
 
     // Per-row path buffers.
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueX;
-    AscendC::TQue<AscendC::TPosition::VECIN, BUFFER_NUM> inQueRes;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueY;
-    AscendC::TQue<AscendC::TPosition::VECOUT, BUFFER_NUM> outQueResOut;
     AscendC::TBuf<AscendC::TPosition::VECCALC> weightHalfBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> weightFp32Buf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> resoFp32Buf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> sqBuf;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> weightFp32Buf;
     AscendC::TBuf<AscendC::TPosition::VECCALC> scalarBuf;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> reduceTmpBuf;
 };
 
 
@@ -559,6 +421,7 @@ extern "C" __global__ __aicore__ void fused_add_rms_norm(GM_ADDR x, GM_ADDR resi
     // through MTE2 -> UB -> two cross-pipe event syncs -> stack copy and
     // costs ~1.1 us more than five scalar loads (calibration 2026-08-27).
     const __gm__ int32_t* tg = reinterpret_cast<const __gm__ int32_t*>(tiling);
+    if (tg[5] == 96) return;  // FLOOR DIAGNOSTIC (post-tiling-read, pre-Init)
     FusedAddRmsNormTilingData tilingData;
     tilingData.batchSize = tg[0];
     tilingData.hiddenSize = tg[1];

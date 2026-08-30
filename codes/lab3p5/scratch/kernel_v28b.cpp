@@ -554,18 +554,37 @@ private:
 extern "C" __global__ __aicore__ void fused_add_rms_norm(GM_ADDR x, GM_ADDR residual, GM_ADDR weight,
                                                           GM_ADDR y, GM_ADDR residual_out,
                                                           GM_ADDR workspace, GM_ADDR tiling) {
-    // Read the tiling struct with direct scalar GM loads instead of the
+    // V21: read the tiling struct with direct scalar GM loads instead of the
     // framework GET_TILING_DATA macro. The macro routes the 24 B struct
     // through MTE2 -> UB -> two cross-pipe event syncs -> stack copy and
     // costs ~1.1 us more than five scalar loads (calibration 2026-08-27).
+    // Probe codes (rowsPerChunk; real values are always in [1,8]): 98 pure
+    // return, 99 one scalar read, 105 direct reads, 106 GET_TILING_DATA.
     const __gm__ int32_t* tg = reinterpret_cast<const __gm__ int32_t*>(tiling);
+    int32_t code = tg[5];
+    if (code == 98) return;
+    if (code == 99) { volatile int32_t v = tg[0]; (void)v; return; }
+    if (code == 105) {
+        volatile int32_t b = tg[0];
+        volatile int32_t h = tg[1];
+        volatile float eps = *reinterpret_cast<const __gm__ float*>(&tg[4]);
+        (void)b; (void)h; (void)eps;
+        return;
+    }
+    if (code == 106) {
+        GET_TILING_DATA(tilingDataP, tiling);
+        volatile int32_t b = tilingDataP.batchSize;
+        (void)b;
+        return;
+    }
+
     FusedAddRmsNormTilingData tilingData;
     tilingData.batchSize = tg[0];
     tilingData.hiddenSize = tg[1];
     tilingData.alignedHidden = tg[2];
     tilingData.alignNum = tg[3];
     tilingData.eps = *reinterpret_cast<const __gm__ float*>(&tg[4]);
-    tilingData.rowsPerChunk = tg[5];
+    tilingData.rowsPerChunk = code;
 
     AscendC::TPipe pipe;
     KernelFusedAddRmsNorm op;
