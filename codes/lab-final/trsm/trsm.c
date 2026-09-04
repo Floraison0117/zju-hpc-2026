@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <string.h>
 #include <omp.h>
 #include "kblas.h"
 
@@ -163,12 +164,75 @@ static void trsm_profile_emit_step(int step, int remaining, int active_threads,
 
 #endif
 
+#ifndef TRSM_WTECH
+#define TRSM_WTECH 1
+#endif
+#ifndef TRSM_WTECH_MAX_BS
+#define TRSM_WTECH_MAX_BS 64
+#endif
+
+#if TRSM_WTECH
+/* Shared strip buffer for the W-technique leaf solve: each thread dgemm's
+ * its column strip of B into buf (row-major bs x n), then rows are copied
+ * back in a second omp-for.  Threads touch disjoint column strips only. */
+static double* trsm_wbuf;
+static int trsm_wbuf_n;
+
+static void trsm_wtech_solve(int bs, int n,
+                             const double* Lbase, int lda,
+                             double* Bbase, int ldb)
+{
+    /* Store the inverse TRANSPOSED: WT[j][i] = inv(L_jj)[i][j].  Then the
+     * inversion inner loop reads WT[j][k] and L[i][k] as contiguous streams
+     * (the naive column-walk of W[k][j] strides 512 B and misses L1 on every
+     * access, which cost ~220 us per leaf in prof_v16_c1.csv). */
+    double WT[TRSM_WTECH_MAX_BS][TRSM_WTECH_MAX_BS];
+    memset(WT, 0, sizeof(WT)); /* dense product: zeros must be explicit */
+    /* Row j of WT = column j of inv(L_jj): solves L_jj w = e_j */
+    for (int j = 0; j < bs; ++j) {
+        for (int i = j; i < bs; ++i) {
+            const double* Li = Lbase + (size_t)i * lda;
+            const double* Wj = WT[j];
+            double s = (i == j) ? 1.0 : 0.0;
+            for (int k = j; k < i; ++k)
+                s -= Li[k] * Wj[k];
+            WT[j][i] = s / Li[i];
+        }
+    }
+    /* B_j := W * B_j, in place via dtrmm, N-split across threads.
+     * Probe (dtrmm_probe.out): (32,17024) 481 tri-GF, (48,19968) 834 tri-GF
+     * vs ~110 GF scalar forward substitution. */
+#pragma omp parallel
+    {
+        const int t = omp_get_thread_num();
+        const int nt = omp_get_num_threads();
+        const int per = n / nt, rem = n % nt;
+        const int start = t * per + (t < rem ? t : rem);
+        const int len = per + (t < rem ? 1 : 0);
+        if (len > 0) {
+            /* B := WT^T * B = inv(L_jj) * B: WT is upper-triangular */
+            cblas_dtrmm(CblasRowMajor, CblasLeft, CblasUpper, CblasTrans,
+                        CblasNonUnit, bs, len, 1.0,
+                        &WT[0][0], TRSM_WTECH_MAX_BS,
+                        Bbase + start, ldb);
+        }
+    }
+}
+#endif
+
 static void solve_diag_block(int bs, int n, int ii,
                              const double* L, int lda, double* B, int ldb,
                              int profile_index)
 {
     const int W = (n <= 1024) ? 16 : 32;
     if (bs <= 0 || n <= 0) return;
+#if TRSM_WTECH
+    if (bs <= TRSM_WTECH_MAX_BS) {
+        trsm_wtech_solve(bs, n, L + (size_t)ii * lda + ii, lda,
+                         B + (size_t)ii * ldb, ldb);
+        return;
+    }
+#endif
 
 #ifdef TRSM_PROFILE
     trsm_profile_thread stats[TRSM_PROFILE_MAX_THREADS];
