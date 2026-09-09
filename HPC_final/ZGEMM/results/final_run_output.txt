@@ -1,0 +1,46 @@
+node=cn22993 N0=0-37 NT=38
+a6cf1a3b89a2cfe1114676ac95a51c8e  bench_zgemm.c
+ae6843a2b8cbe62769f47864fa960e05  zgemm_nc192.c
+d8c08e87f6f32016957b64ff25c5e634  zgemm_str1.c
+0dfd4043fe0ad1eb1ae29a1a0032d803  zgemm_str2.c
+785ec8b17d03f387f62c47b815f116cc  bench_str.c
+=== build v7 + str1 + str2 + bst ===
+=== A/B official cases (taskset node0, 38t) ===
+--- v7 ---
+  7427 x  7427 x   256       111.86    1009.9304     2.57e-12     PASS
+ 14848 x 14848 x   256       421.26    1071.8173     2.70e-12     PASS
+ 37360 x  8192 x   512      1201.30    1043.5300     4.27e-12     PASS
+--- str1 ---
+  7427 x  7427 x   256       881.51     128.1531     3.09e-12     PASS
+ 14848 x 14848 x   256      3481.39     129.6920     3.57e-12     PASS
+ 37360 x  8192 x   512      4934.22     254.0612     4.44e-12     PASS
+--- str2 ---
+  7427 x  7427 x   256      2602.28      43.4113     4.06e-12     PASS
+ 14848 x 14848 x   256      9438.22      47.8383     4.14e-12     PASS
+ 37360 x  8192 x   512     27823.74      45.0548     1.17e-11     PASS
+=== str2 per-phase profile (case 1) ===
+[str] gather=0.009s add=0.018s merge=0.659s prod(L1)=1.349s/49 prod(L2)=2.377s/7
+[str] gather=0.019s add=0.035s merge=1.304s prod(L1)=2.677s/98 prod(L2)=4.719s/14
+  7427 x  7427 x   256      2607.19      43.3295     4.06e-12     PASS
+=== size ladder (collapse probe, v7 path) ===
+c2 full         14848 x 14848 x  256     439.38 ms    1027.60 GF
+c2 half          7424 x  7424 x  256     112.95 ms     999.39 GF
+c2 half K128     7424 x  7424 x  128      58.98 ms     956.96 GF
+c2 quarter       3712 x  3712 x  128      18.01 ms     783.34 GF
+c2 quarter K64   3712 x  3712 x   64      15.86 ms     444.95 GF
+c1 full          7427 x  7427 x  256     113.01 ms     999.61 GF
+c1 half          3714 x  3714 x  128      17.82 ms     792.60 GF
+c1 quarter       1857 x  1857 x   64       7.10 ms     248.63 GF
+c3 full         37360 x  8192 x  512    1205.25 ms    1040.11 GF
+c3 half         18680 x  4096 x  256     157.69 ms     993.72 GF
+c3 quarter       9340 x  2048 x  128      21.92 ms     893.78 GF
+c2 L2 sub        3712 x  3712 x   64      13.68 ms     515.70 GF
+c1 L2 sub        1857 x  1857 x   64       4.94 ms     357.55 GF
+c3 L2 sub        9340 x  2048 x   64      19.43 ms     504.13 GF
+=== add bandwidth ===
+add        50.3 MB    0.0004 s      141.4 GB/s
+add       201.3 MB    0.0014 s      139.8 GB/s
+add       805.3 MB    0.0056 s      144.4 GB/s
+add      3221.2 MB    0.0226 s      142.5 GB/s
+add     12884.9 MB    0.0867 s      148.6 GB/s
+=== SVNUMA19_DONE ===

@@ -1,45 +1,61 @@
-# HPC 高性能计算实验仓库
+# HPC 高性能计算实验与大作业
 
-2025-2026 暑期 HPC 课程实验。包含 Lab1-Lab5(含 Lab3.5、Lab4.5)的实验报告与最终代码,以及大作业(鲲鹏挑战赛 S2 赛季)的优化代码。所有实验均已交付,报告以 Typst 编写。
+2025–2026 暑期 HPC 课程实验仓库，记录 Lab1–Lab5（含 Lab3.5、Lab4.5）的实验报告、实验代码与配套素材，并包含鲲鹏高性能计算全球挑战赛 S2 赛季大作业的最终交付文件。报告使用 Typst 编写。
+
+## 内容概览
+
+| 内容 | 主题 | 主要平台 | 入口 |
+|---|---|---|---|
+| Lab1 | 集群搭建、作业调度与 HPL 并行基准测试 | WSL2 Docker、OpenMPI | [报告](labs/lab1.pdf) · [源码](labs/lab1.typ) |
+| Lab2 | W8A8 MoE 前向优化 | Intel Xeon Gold 5418Y、AVX-512 VNNI / AMX-INT8 | [报告](labs/lab2.pdf) · [`moe_opt.cpp`](codes/lab2/moe_opt.cpp) |
+| Lab3 | GDN prefill forward kernel | NVIDIA H800 MIG、TileLang | [报告](labs/lab3.pdf) · [`tilelang_fwd.py`](codes/lab3/tilelang_fwd.py) |
+| Lab3.5 | FusedAddRmsNorm 融合算子优化 | 华为昇腾 910B4 | [报告](labs/lab3.5.pdf) · [`codes/lab3p5/`](codes/lab3p5/) |
+| Lab4 | AMSS-NCKU 双黑洞并合，ABE CPU 与 ABEGPU | 鲲鹏 920B、NVIDIA A100 MIG | [报告](labs/lab4.pdf) · [`codes/lab4-cpu/`](codes/lab4-cpu/) · [`codes/lab4-gpu/`](codes/lab4-gpu/) |
+| Lab4.5 | INT8 Tensor Core 模拟 FP64 GEMM | NVIDIA A100 MIG | [报告](labs/lab4.5.pdf) · [`my_int8_fp64.cu`](codes/lab4p5/my_int8_fp64.cu) |
+| Lab5 | Gemma4-12B INT4 量化与推理吞吐优化 | NVIDIA H800 MIG | [报告](labs/lab5.pdf) · [`codes/lab5/`](codes/lab5/) |
+| Final | CONV、TRSM、ZGEMM 优化 | 鲲鹏 920F、深超算 NSCC-SZ | [交付目录](HPC_final/) · [TRSM 报告](labs/lab_final_trsm.pdf) |
 
 ## 目录结构
 
+```text
+labs/                 实验报告源文件（.typ）与 PDF
+assets/labN/          报告引用的截图与素材
+codes/                各实验源码、脚本与实验记录
+codes/lab-final/      大作业源码及各算子的说明
+HPC_final/            大作业最终交付包
+  report.pdf          大作业报告
+  presentation.pptx  大作业汇报幻灯片
+  CONV/ TRSM/ ZGEMM/ 三个独立算子的源码、脚本与结果
+hpc101/               课程资料与 HPC 学习笔记
+ascend-c/             Ascend C 教程与示例
+misc/                 报告写作工作流等辅助文档
+AGENTS.md             仓库协作、实验环境与构建约定
 ```
-labs/            实验报告源文件 (.typ) 与编译产物 (.pdf)
-assets/labN/     报告引用的截图与素材
-codes/           各实验的最终提交代码
-misc/            报告写作工作流等杂项文档
-hpc101/          课程提供的 LLM 推理框架 (Lab5)
-ascend-c/        昇腾 Ascend C 教程与示例 (Lab3.5)
-AGENTS.md        仓库工作规范: 实验环境、编辑规则、Typst 约定、验证流程
-trsm_submission.zip  大作业 TRSM 提交包
-```
 
-## 实验概览
+## 大作业
 
-| Lab | 主题 | 平台 | 代码位置 |
-|---|---|---|---|
-| Lab1 | 集群搭建、作业调度与 HPL 并行基准测试 | 本地 WSL2 Docker 4 容器, OpenMPI | (报告中含命令记录) |
-| Lab2 | W8A8 MoE 前向优化, AVX-512 VNNI / AMX-INT8 | Intel Xeon Gold 5418Y | `codes/lab2/moe_opt.cpp` |
-| Lab3 | GDN prefill forward kernel, TileLang | NVIDIA H800 MIG 1g.10gb | `codes/lab3/tilelang_fwd.py` |
-| Lab3.5 | FusedAddRmsNorm 融合算子优化 | 华为昇腾 910B4 NPU | `codes/lab3p5/` |
-| Lab4 | AMSS-NCKU 双黑洞并合: 任务一 ABE CPU, 任务二 ABEGPU | 鲲鹏 920B / A100 MIG 1g.10gb | `codes/lab4-cpu/`, `codes/lab4-gpu/` |
-| Lab4.5 | INT8 Tensor Core 模拟 FP64 GEMM | A100 MIG 1g.10gb | `codes/lab4p5/my_int8_fp64.cu` |
-| Lab5 | Gemma4-12B INT4 量化与推理吞吐优化 | H800 MIG 1g.10gb | `codes/lab5/` |
-| Final | 鲲鹏挑战赛 S2: CONV / TRSM / ZGEMM | 鲲鹏 920F, 深超算 NSCC-SZ | `codes/lab-final/{conv,trsm,zgemm}/` |
+大作业包含三个独立内核：
 
-大作业已完成 TRSM 优化(报告见 `labs/lab_final/lab_final_trsm.pdf`),提交包为根目录 `trsm_submission.zip`。
+- CONV：二维卷积优化，源码与运行说明见 [`HPC_final/CONV/`](HPC_final/CONV/)。
+- TRSM：三角矩阵求解优化，当前交付版本与实验记录见 [`HPC_final/TRSM/`](HPC_final/TRSM/)；报告见 [`labs/lab_final_trsm.pdf`](labs/lab_final_trsm.pdf)。
+- ZGEMM：复数矩阵乘法优化，结果与历史版本见 [`HPC_final/ZGEMM/`](HPC_final/ZGEMM/)。
 
-## 编译报告
+正式运行使用鲲鹏 920F 计算节点、`OMP_NUM_THREADS=38` 和 `numactl -N 1`。各算子的编译命令、测试规模和运行脚本以对应目录中的 README 与脚本为准。
+
+## 编译 Typst 报告
+
+在仓库根目录执行：
 
 ```powershell
 typst compile --root . .\labs\lab1.typ .\labs\lab1.pdf
 ```
 
-报告排版约定(字体 `("Palatino Linotype", "KaiTi")`、表格居中等)详见 `AGENTS.md` 与 `misc/typst-lab-report-workflow.md`。
+将 `lab1` 替换为其他报告文件名即可。报告排版约定（字体 `("Palatino Linotype", "KaiTi")`、表格居中等）见 [`AGENTS.md`](AGENTS.md) 和 [`misc/typst-lab-report-workflow.md`](misc/typst-lab-report-workflow.md)。
 
-## 实验环境速查
+## 实验环境
 
-- Lab1 在本地 WSL2 Docker 中完成,其余实验均在 ZJU `zju-hpc-lab2` / `zju-hpc-arm` 远程主机上运行,GPU 分区为单用户 MIG 切片,单作业 30 分钟墙钟。
-- 大作业使用深超算(NSCC-SZ)鲲鹏 920F 集群,经天融信 VPN 接入,多瑙(Donau)调度器。
-- 详细访问方式、集群凭据注意事项与各实验硬件配置见 `AGENTS.md`。
+- Lab1 在本地 WSL2 Docker 环境完成，其余课程实验主要使用 ZJU HPC 主机与 NVIDIA MIG 分区。
+- Final 使用深超算 NSCC-SZ 的鲲鹏 920F 集群和 Donau 调度器，与 ZJU 集群相互独立。
+- 环境、构建方式、验证规则及远程运行注意事项见 [`AGENTS.md`](AGENTS.md)。
+
+仓库中的 `tmp/`、`.remote_work/` 等目录仅用于临时工作，不属于正式交付物。
